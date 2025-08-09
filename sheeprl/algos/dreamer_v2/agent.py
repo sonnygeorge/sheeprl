@@ -22,7 +22,15 @@ from torch.distributions import (
 )
 
 from sheeprl.algos.dreamer_v2.utils import compute_stochastic_state, init_weights
-from sheeprl.models.models import CNN, MLP, DeCNN, LayerNormChannelLast, LayerNormGRUCell, MultiDecoder, MultiEncoder
+from sheeprl.models.models import (
+    CNN,
+    MLP,
+    DeCNN,
+    LayerNormChannelLast,
+    LayerNormGRUCell,
+    MultiDecoder,
+    MultiEncoder,
+)
 from sheeprl.utils.distribution import TruncatedNormal
 from sheeprl.utils.fabric import get_single_device_fabric
 from sheeprl.utils.model import ModuleType, cnn_forward
@@ -67,7 +75,9 @@ class CNNEncoder(nn.Module):
                 activation=activation,
                 norm_layer=[LayerNormChannelLast for _ in range(4)] if layer_norm else None,
                 norm_args=(
-                    [{"normalized_shape": (2**i) * channels_multiplier} for i in range(4)] if layer_norm else None
+                    [{"normalized_shape": (2**i) * channels_multiplier} for i in range(4)]
+                    if layer_norm
+                    else None
                 ),
             ),
             nn.Flatten(-3, -1),
@@ -117,7 +127,11 @@ class MLPEncoder(nn.Module):
             [dense_units] * mlp_layers,
             activation=activation,
             norm_layer=[nn.LayerNorm for _ in range(mlp_layers)] if layer_norm else None,
-            norm_args=[{"normalized_shape": dense_units} for _ in range(mlp_layers)] if layer_norm else None,
+            norm_args=(
+                [{"normalized_shape": dense_units} for _ in range(mlp_layers)]
+                if layer_norm
+                else None
+            ),
         )
         self.output_dim = dense_units
 
@@ -168,7 +182,8 @@ class CNNDecoder(nn.Module):
             nn.Unflatten(1, (cnn_encoder_output_dim, 1, 1)),
             DeCNN(
                 input_channels=cnn_encoder_output_dim,
-                hidden_channels=(torch.tensor([4, 2, 1]) * channels_multiplier).tolist() + [self.output_dim[0]],
+                hidden_channels=(torch.tensor([4, 2, 1]) * channels_multiplier).tolist()
+                + [self.output_dim[0]],
                 layer_args=[
                     {"kernel_size": 5, "stride": 2},
                     {"kernel_size": 5, "stride": 2},
@@ -176,9 +191,14 @@ class CNNDecoder(nn.Module):
                     {"kernel_size": 6, "stride": 2},
                 ],
                 activation=[activation, activation, activation, None],
-                norm_layer=[LayerNormChannelLast for _ in range(3)] + [None] if layer_norm else None,
+                norm_layer=(
+                    [LayerNormChannelLast for _ in range(3)] + [None] if layer_norm else None
+                ),
                 norm_args=(
-                    [{"normalized_shape": (2 ** (4 - i - 2)) * channels_multiplier} for i in range(self.output_dim[0])]
+                    [
+                        {"normalized_shape": (2 ** (4 - i - 2)) * channels_multiplier}
+                        for i in range(self.output_dim[0])
+                    ]
                     + [None]
                     if layer_norm
                     else None
@@ -234,9 +254,15 @@ class MLPDecoder(nn.Module):
             [dense_units] * mlp_layers,
             activation=activation,
             norm_layer=[nn.LayerNorm for _ in range(mlp_layers)] if layer_norm else None,
-            norm_args=[{"normalized_shape": dense_units} for _ in range(mlp_layers)] if layer_norm else None,
+            norm_args=(
+                [{"normalized_shape": dense_units} for _ in range(mlp_layers)]
+                if layer_norm
+                else None
+            ),
         )
-        self.heads = nn.ModuleList([nn.Linear(dense_units, mlp_dim) for mlp_dim in self.output_dims])
+        self.heads = nn.ModuleList(
+            [nn.Linear(dense_units, mlp_dim) for mlp_dim in self.output_dims]
+        )
 
     def forward(self, latent_states: Tensor) -> Dict[str, Tensor]:
         reconstructed_obs = {}
@@ -279,7 +305,11 @@ class RecurrentModel(nn.Module):
             norm_args=[{"normalized_shape": dense_units}] if layer_norm else None,
         )
         self.rnn = LayerNormGRUCell(
-            dense_units, recurrent_state_size, bias=True, batch_first=False, layer_norm_cls=nn.LayerNorm
+            dense_units,
+            recurrent_state_size,
+            bias=True,
+            batch_first=False,
+            layer_norm_cls=nn.LayerNorm,
         )
 
     def forward(self, input: Tensor, recurrent_state: Tensor) -> Tensor:
@@ -331,7 +361,12 @@ class RSSM(nn.Module):
         self.distribution_cfg = distribution_cfg
 
     def dynamic(
-        self, posterior: Tensor, recurrent_state: Tensor, action: Tensor, embedded_obs: Tensor, is_first: Tensor
+        self,
+        posterior: Tensor,
+        recurrent_state: Tensor,
+        action: Tensor,
+        embedded_obs: Tensor,
+        is_first: Tensor,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """
         Perform one step of the dynamic learning:
@@ -367,7 +402,9 @@ class RSSM(nn.Module):
         posterior_logits, posterior = self._representation(recurrent_state, embedded_obs)
         return recurrent_state, posterior, prior, posterior_logits, prior_logits
 
-    def _representation(self, recurrent_state: Tensor, embedded_obs: Tensor) -> Tuple[Tensor, Tensor]:
+    def _representation(
+        self, recurrent_state: Tensor, embedded_obs: Tensor
+    ) -> Tuple[Tensor, Tensor]:
         """
         Args:
             recurrent_state (Tensor): the recurrent state of the recurrent model, i.e.,
@@ -394,7 +431,9 @@ class RSSM(nn.Module):
         logits = self.transition_model(recurrent_out)
         return logits, compute_stochastic_state(logits, discrete=self.discrete)
 
-    def imagination(self, prior: Tensor, recurrent_state: Tensor, actions: Tensor) -> Tuple[Tensor, Tensor]:
+    def imagination(
+        self, prior: Tensor, recurrent_state: Tensor, actions: Tensor
+    ) -> Tuple[Tensor, Tensor]:
         """
         One-step imagination of the next latent state.
         It can be used several times to imagine trajectories in the latent space (Transition Model).
@@ -481,12 +520,18 @@ class Actor(nn.Module):
             activation=activation,
             flatten_dim=None,
             norm_layer=[nn.LayerNorm for _ in range(mlp_layers)] if layer_norm else None,
-            norm_args=[{"normalized_shape": dense_units} for _ in range(mlp_layers)] if layer_norm else None,
+            norm_args=(
+                [{"normalized_shape": dense_units} for _ in range(mlp_layers)]
+                if layer_norm
+                else None
+            ),
         )
         if is_continuous:
             self.mlp_heads = nn.ModuleList([nn.Linear(dense_units, sum(actions_dim) * 2)])
         else:
-            self.mlp_heads = nn.ModuleList([nn.Linear(dense_units, action_dim) for action_dim in actions_dim])
+            self.mlp_heads = nn.ModuleList(
+                [nn.Linear(dense_units, action_dim) for action_dim in actions_dim]
+            )
         self.actions_dim = actions_dim
         self.is_continuous = is_continuous
         self.init_std = torch.tensor(init_std)
@@ -528,7 +573,9 @@ class Actor(nn.Module):
                 mean = 5 * torch.tanh(mean / 5)
                 std = F.softplus(std + self.init_std) + self.min_std
                 actions_dist = Normal(mean, std)
-                actions_dist = Independent(TransformedDistribution(actions_dist, TanhTransform()), 1)
+                actions_dist = Independent(
+                    TransformedDistribution(actions_dist, TanhTransform()), 1
+                )
             elif self.distribution == "normal":
                 actions_dist = Normal(mean, std)
                 actions_dist = Independent(actions_dist, 1)
@@ -569,7 +616,9 @@ class Actor(nn.Module):
             for act in actions:
                 sample = OneHotCategorical(logits=torch.zeros_like(act)).sample().to(act.device)
                 expl_actions.append(
-                    torch.where(torch.rand(act.shape[:1], device=act.device) < expl_amount, sample, act)
+                    torch.where(
+                        torch.rand(act.shape[:1], device=act.device) < expl_amount, sample, act
+                    )
                 )
         return tuple(expl_actions)
 
@@ -633,14 +682,18 @@ class MinedojoActor(Actor):
         for i, logits in enumerate(actions_logits):
             if mask is not None:
                 if i == 0:
-                    logits[torch.logical_not(mask["mask_action_type"].expand_as(logits))] = -torch.inf
+                    logits[torch.logical_not(mask["mask_action_type"].expand_as(logits))] = (
+                        -torch.inf
+                    )
                 elif i == 1:
                     mask["mask_craft_smelt"] = mask["mask_craft_smelt"].expand_as(logits)
                     for t in range(functional_action.shape[0]):
                         for b in range(functional_action.shape[1]):
                             sampled_action = functional_action[t, b].item()
                             if sampled_action == 15:  # Craft action
-                                logits[t, b][torch.logical_not(mask["mask_craft_smelt"][t, b])] = -torch.inf
+                                logits[t, b][
+                                    torch.logical_not(mask["mask_craft_smelt"][t, b])
+                                ] = -torch.inf
                 elif i == 2:
                     mask["mask_destroy"][t, b] = mask["mask_destroy"].expand_as(logits)
                     mask["mask_equip_place"] = mask["mask_equip_place"].expand_as(logits)
@@ -648,9 +701,13 @@ class MinedojoActor(Actor):
                         for b in range(functional_action.shape[1]):
                             sampled_action = functional_action[t, b].item()
                             if sampled_action in (16, 17):  # Equip/Place action
-                                logits[t, b][torch.logical_not(mask["mask_equip_place"][t, b])] = -torch.inf
+                                logits[t, b][
+                                    torch.logical_not(mask["mask_equip_place"][t, b])
+                                ] = -torch.inf
                             elif sampled_action == 18:  # Destroy action
-                                logits[t, b][torch.logical_not(mask["mask_destroy"][t, b])] = -torch.inf
+                                logits[t, b][
+                                    torch.logical_not(mask["mask_destroy"][t, b])
+                                ] = -torch.inf
             actions_dist.append(OneHotCategoricalStraightThrough(logits=logits))
             if not greedy:
                 actions.append(actions_dist[-1].rsample())
@@ -670,14 +727,18 @@ class MinedojoActor(Actor):
             # Exploratory action must respect the constraints of the environment
             if mask is not None:
                 if i == 0:
-                    logits[torch.logical_not(mask["mask_action_type"].expand_as(logits))] = -torch.inf
+                    logits[torch.logical_not(mask["mask_action_type"].expand_as(logits))] = (
+                        -torch.inf
+                    )
                 elif i == 1:
                     mask["mask_craft_smelt"] = mask["mask_craft_smelt"].expand_as(logits)
                     for t in range(functional_action.shape[0]):
                         for b in range(functional_action.shape[1]):
                             sampled_action = functional_action[t, b].item()
                             if sampled_action == 15:  # Craft action
-                                logits[t, b][torch.logical_not(mask["mask_craft_smelt"][t, b])] = -torch.inf
+                                logits[t, b][
+                                    torch.logical_not(mask["mask_craft_smelt"][t, b])
+                                ] = -torch.inf
                 elif i == 2:
                     mask["mask_destroy"][t, b] = mask["mask_destroy"].expand_as(logits)
                     mask["mask_equip_place"] = mask["mask_equip_place"].expand_as(logits)
@@ -685,9 +746,13 @@ class MinedojoActor(Actor):
                         for b in range(functional_action.shape[1]):
                             sampled_action = functional_action[t, b].item()
                             if sampled_action in {16, 17}:  # Equip/Place action
-                                logits[t, b][torch.logical_not(mask["mask_equip_place"][t, b])] = -torch.inf
+                                logits[t, b][
+                                    torch.logical_not(mask["mask_equip_place"][t, b])
+                                ] = -torch.inf
                             elif sampled_action == 18:  # Destroy action
-                                logits[t, b][torch.logical_not(mask["mask_destroy"][t, b])] = -torch.inf
+                                logits[t, b][
+                                    torch.logical_not(mask["mask_destroy"][t, b])
+                                ] = -torch.inf
             sample = OneHotCategorical(logits=torch.zeros_like(act)).sample().to(act.device)
             expl_amount = self._get_expl_amount(step)
             # If the action[0] was changed, and now it is critical, then we force to change also the other 2 actions
@@ -698,7 +763,11 @@ class MinedojoActor(Actor):
                 and expl_actions[0].argmax().item() in {15, 16, 17, 18}
             ):
                 expl_amount = 2
-            expl_actions.append(torch.where(torch.rand(act.shape[:1], device=self.device) < expl_amount, sample, act))
+            expl_actions.append(
+                torch.where(
+                    torch.rand(act.shape[:1], device=self.device) < expl_amount, sample, act
+                )
+            )
             if mask is not None and i == 0:
                 functional_action = expl_actions[0].argmax(dim=-1)
         return tuple(expl_actions)
@@ -789,15 +858,23 @@ class PlayerDV2(nn.Module):
                 Defaults to None.
         """
         if reset_envs is None or len(reset_envs) == 0:
-            self.actions = torch.zeros(1, self.num_envs, np.sum(self.actions_dim), device=self.device)
-            self.recurrent_state = torch.zeros(1, self.num_envs, self.recurrent_state_size, device=self.device)
+            self.actions = torch.zeros(
+                1, self.num_envs, np.sum(self.actions_dim), device=self.device
+            )
+            self.recurrent_state = torch.zeros(
+                1, self.num_envs, self.recurrent_state_size, device=self.device
+            )
             self.stochastic_state = torch.zeros(
                 1, self.num_envs, self.stochastic_size * self.discrete_size, device=self.device
             )
         else:
             self.actions[:, reset_envs] = torch.zeros_like(self.actions[:, reset_envs])
-            self.recurrent_state[:, reset_envs] = torch.zeros_like(self.recurrent_state[:, reset_envs])
-            self.stochastic_state[:, reset_envs] = torch.zeros_like(self.stochastic_state[:, reset_envs])
+            self.recurrent_state[:, reset_envs] = torch.zeros_like(
+                self.recurrent_state[:, reset_envs]
+            )
+            self.stochastic_state[:, reset_envs] = torch.zeros_like(
+                self.stochastic_state[:, reset_envs]
+            )
 
     def get_actions(
         self,
@@ -822,12 +899,16 @@ class PlayerDV2(nn.Module):
         self.recurrent_state = self.recurrent_model(
             torch.cat((self.stochastic_state, self.actions), -1), self.recurrent_state
         )
-        posterior_logits = self.representation_model(torch.cat((self.recurrent_state, embedded_obs), -1))
+        posterior_logits = self.representation_model(
+            torch.cat((self.recurrent_state, embedded_obs), -1)
+        )
         stochastic_state = compute_stochastic_state(posterior_logits, discrete=self.discrete_size)
         self.stochastic_state = stochastic_state.view(
             *stochastic_state.shape[:-2], self.stochastic_size * self.discrete_size
         )
-        actions, _ = self.actor(torch.cat((self.stochastic_state, self.recurrent_state), -1), greedy, mask)
+        actions, _ = self.actor(
+            torch.cat((self.stochastic_state, self.recurrent_state), -1), greedy, mask
+        )
         self.actions = torch.cat(actions, -1)
         return actions
 
@@ -879,7 +960,9 @@ def build_agent(
     cnn_encoder = (
         CNNEncoder(
             keys=cfg.algo.cnn_keys.encoder,
-            input_channels=[int(np.prod(obs_space[k].shape[:-2])) for k in cfg.algo.cnn_keys.encoder],
+            input_channels=[
+                int(np.prod(obs_space[k].shape[:-2])) for k in cfg.algo.cnn_keys.encoder
+            ],
             image_size=obs_space[cfg.algo.cnn_keys.encoder[0]].shape[-2:],
             channels_multiplier=world_model_cfg.encoder.cnn_channels_multiplier,
             layer_norm=world_model_cfg.encoder.layer_norm,
@@ -907,7 +990,9 @@ def build_agent(
     )
     representation_model = MLP(
         input_dims=(
-            world_model_cfg.recurrent_model.recurrent_state_size + encoder.cnn_output_dim + encoder.mlp_output_dim
+            world_model_cfg.recurrent_model.recurrent_state_size
+            + encoder.cnn_output_dim
+            + encoder.mlp_output_dim
         ),
         output_dim=stochastic_size,
         hidden_sizes=[world_model_cfg.representation_model.hidden_size],
@@ -943,7 +1028,9 @@ def build_agent(
     cnn_decoder = (
         CNNDecoder(
             keys=cfg.algo.cnn_keys.decoder,
-            output_channels=[int(np.prod(obs_space[k].shape[:-2])) for k in cfg.algo.cnn_keys.decoder],
+            output_channels=[
+                int(np.prod(obs_space[k].shape[:-2])) for k in cfg.algo.cnn_keys.decoder
+            ],
             channels_multiplier=world_model_cfg.observation_model.cnn_channels_multiplier,
             latent_state_size=latent_state_size,
             cnn_encoder_output_dim=cnn_encoder.output_dim,
@@ -971,7 +1058,8 @@ def build_agent(
     reward_model = MLP(
         input_dims=latent_state_size,
         output_dim=1,
-        hidden_sizes=[world_model_cfg.reward_model.dense_units] * world_model_cfg.reward_model.mlp_layers,
+        hidden_sizes=[world_model_cfg.reward_model.dense_units]
+        * world_model_cfg.reward_model.mlp_layers,
         activation=hydra.utils.get_class(world_model_cfg.reward_model.dense_act),
         flatten_dim=None,
         norm_layer=(
@@ -992,7 +1080,8 @@ def build_agent(
         continue_model = MLP(
             input_dims=latent_state_size,
             output_dim=1,
-            hidden_sizes=[world_model_cfg.discount_model.dense_units] * world_model_cfg.discount_model.mlp_layers,
+            hidden_sizes=[world_model_cfg.discount_model.dense_units]
+            * world_model_cfg.discount_model.mlp_layers,
             activation=hydra.utils.get_class(world_model_cfg.discount_model.dense_act),
             flatten_dim=None,
             norm_layer=(
@@ -1035,7 +1124,9 @@ def build_agent(
         hidden_sizes=[critic_cfg.dense_units] * critic_cfg.mlp_layers,
         activation=hydra.utils.get_class(critic_cfg.dense_act),
         flatten_dim=None,
-        norm_layer=[nn.LayerNorm for _ in range(critic_cfg.mlp_layers)] if critic_cfg.layer_norm else None,
+        norm_layer=(
+            [nn.LayerNorm for _ in range(critic_cfg.mlp_layers)] if critic_cfg.layer_norm else None
+        ),
         norm_args=(
             [{"normalized_shape": critic_cfg.dense_units} for _ in range(critic_cfg.mlp_layers)]
             if critic_cfg.layer_norm
@@ -1073,7 +1164,9 @@ def build_agent(
     world_model.observation_model = fabric.setup_module(world_model.observation_model)
     world_model.reward_model = fabric.setup_module(world_model.reward_model)
     world_model.rssm.recurrent_model = fabric.setup_module(world_model.rssm.recurrent_model)
-    world_model.rssm.representation_model = fabric.setup_module(world_model.rssm.representation_model)
+    world_model.rssm.representation_model = fabric.setup_module(
+        world_model.rssm.representation_model
+    )
     world_model.rssm.transition_model = fabric.setup_module(world_model.rssm.transition_model)
     if world_model.continue_model:
         world_model.continue_model = fabric.setup_module(world_model.continue_model)
@@ -1095,9 +1188,13 @@ def build_agent(
     # Tie weights between the agent and the player
     for agent_p, p in zip(world_model.encoder.parameters(), player.encoder.parameters()):
         p.data = agent_p.data
-    for agent_p, p in zip(world_model.rssm.recurrent_model.parameters(), player.recurrent_model.parameters()):
+    for agent_p, p in zip(
+        world_model.rssm.recurrent_model.parameters(), player.recurrent_model.parameters()
+    ):
         p.data = agent_p.data
-    for agent_p, p in zip(world_model.rssm.representation_model.parameters(), player.representation_model.parameters()):
+    for agent_p, p in zip(
+        world_model.rssm.representation_model.parameters(), player.representation_model.parameters()
+    ):
         p.data = agent_p.data
     for agent_p, p in zip(actor.parameters(), player.actor.parameters()):
         p.data = agent_p.data

@@ -211,18 +211,25 @@ def train(
     imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
     imagined_trajectories = torch.empty(
         cfg.algo.horizon + 1,
-        batch_size * sequence_length,
+        batch_size * sequence_length,  # Number of total imagined trajectories
         stoch_state_size + recurrent_state_size,
         device=device,
     )
     imagined_trajectories[0] = imagined_latent_state
     imagined_actions = torch.empty(
         cfg.algo.horizon + 1,
-        batch_size * sequence_length,
+        batch_size * sequence_length,  # Number of total imagined trajectories
         data["actions"].shape[-1],
         device=device,
     )
+    # In this line of code, we sample an action for all 1024 (64*16) latent observations in train step
     actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+    # Here, we set this as the first imagined action for all 1024 imagined trajectories
+    # TODO: The actor, instead of returning [1, per_rank_batch_size*per_rank_sequence_length, action_dim],
+    # will return a tuple of actions, halt probs ([1, max_halts, ", "], [1, max_halts, 1])
+    # TODO: What is the first dimension here?
+    # TODO: Maintain this max_halts dimension (imagining trajectories for all halts), all the way up until loss calc
+    # TODO: After which, we calculate the halt-prob-aggregated PonderNet loss and backward() from that
     imagined_actions[0] = actions
 
     # The imagination goes like this, with H=3:

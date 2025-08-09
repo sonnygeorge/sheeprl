@@ -1,5 +1,5 @@
 defaults:
-  - dreamer_and_ponder
+  - dream_and_ponder
   - _self_
 
 dense_units: 256

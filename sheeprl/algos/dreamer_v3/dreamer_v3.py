@@ -129,15 +129,21 @@ def train(
             priors_logits[i] = prior_logits
     else:
         posterior = torch.zeros(1, batch_size, stochastic_size, discrete_size, device=device)
-        posteriors = torch.empty(sequence_length, batch_size, stochastic_size, discrete_size, device=device)
-        posteriors_logits = torch.empty(sequence_length, batch_size, stoch_state_size, device=device)
+        posteriors = torch.empty(
+            sequence_length, batch_size, stochastic_size, discrete_size, device=device
+        )
+        posteriors_logits = torch.empty(
+            sequence_length, batch_size, stoch_state_size, device=device
+        )
         for i in range(0, sequence_length):
-            recurrent_state, posterior, _, posterior_logits, prior_logits = world_model.rssm.dynamic(
-                posterior,
-                recurrent_state,
-                batch_actions[i : i + 1],
-                embedded_obs[i : i + 1],
-                data["is_first"][i : i + 1],
+            recurrent_state, posterior, _, posterior_logits, prior_logits = (
+                world_model.rssm.dynamic(
+                    posterior,
+                    recurrent_state,
+                    batch_actions[i : i + 1],
+                    embedded_obs[i : i + 1],
+                    data["is_first"][i : i + 1],
+                )
             )
             recurrent_states[i] = recurrent_state
             priors_logits[i] = prior_logits
@@ -169,7 +175,9 @@ def train(
 
     # Reshape posterior and prior logits to shape [B, T, 32, 32]
     priors_logits = priors_logits.view(*priors_logits.shape[:-1], stochastic_size, discrete_size)
-    posteriors_logits = posteriors_logits.view(*posteriors_logits.shape[:-1], stochastic_size, discrete_size)
+    posteriors_logits = posteriors_logits.view(
+        *posteriors_logits.shape[:-1], stochastic_size, discrete_size
+    )
 
     # World model optimization step. Eq. 4 in the paper
     world_optimizer.zero_grad(set_to_none=True)
@@ -233,7 +241,9 @@ def train(
 
     # Imagine trajectories in the latent space
     for i in range(1, cfg.algo.horizon + 1):
-        imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
+        imagined_prior, recurrent_state = world_model.rssm.imagination(
+            imagined_prior, recurrent_state, actions
+        )
         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
         imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
         imagined_trajectories[i] = imagined_latent_state
@@ -242,8 +252,12 @@ def train(
 
     # Predict values, rewards and continues
     predicted_values = TwoHotEncodingDistribution(critic(imagined_trajectories), dims=1).mean
-    predicted_rewards = TwoHotEncodingDistribution(world_model.reward_model(imagined_trajectories), dims=1).mean
-    continues = Independent(BernoulliSafeMode(logits=world_model.continue_model(imagined_trajectories)), 1).mode
+    predicted_rewards = TwoHotEncodingDistribution(
+        world_model.reward_model(imagined_trajectories), dims=1
+    ).mean
+    continues = Independent(
+        BernoulliSafeMode(logits=world_model.continue_model(imagined_trajectories)), 1
+    ).mode
     true_continue = (1 - data["terminated"]).flatten().reshape(1, -1, 1)
     continues = torch.cat((true_continue, continues[1:]))
 
@@ -284,14 +298,18 @@ def train(
             torch.stack(
                 [
                     p.log_prob(imgnd_act.detach()).unsqueeze(-1)[:-1]
-                    for p, imgnd_act in zip(policies, torch.split(imagined_actions, actions_dim, dim=-1))
+                    for p, imgnd_act in zip(
+                        policies, torch.split(imagined_actions, actions_dim, dim=-1)
+                    )
                 ],
                 dim=-1,
             ).sum(dim=-1)
             * advantage.detach()
         )
     try:
-        entropy = cfg.algo.actor.ent_coef * torch.stack([p.entropy() for p in policies], -1).sum(dim=-1)
+        entropy = cfg.algo.actor.ent_coef * torch.stack([p.entropy() for p in policies], -1).sum(
+            dim=-1
+        )
     except NotImplementedError:
         entropy = torch.zeros_like(objective)
     policy_loss = -torch.mean(discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1]))
@@ -299,7 +317,10 @@ def train(
     actor_grads = None
     if cfg.algo.actor.clip_gradients is not None and cfg.algo.actor.clip_gradients > 0:
         actor_grads = fabric.clip_gradients(
-            module=actor, optimizer=actor_optimizer, max_norm=cfg.algo.actor.clip_gradients, error_if_nonfinite=False
+            module=actor,
+            optimizer=actor_optimizer,
+            max_norm=cfg.algo.actor.clip_gradients,
+            error_if_nonfinite=False,
         )
     actor_optimizer.step()
 
@@ -336,11 +357,17 @@ def train(
         aggregator.update("State/kl", kl.mean().detach())
         aggregator.update(
             "State/post_entropy",
-            Independent(OneHotCategorical(logits=posteriors_logits.detach()), 1).entropy().mean().detach(),
+            Independent(OneHotCategorical(logits=posteriors_logits.detach()), 1)
+            .entropy()
+            .mean()
+            .detach(),
         )
         aggregator.update(
             "State/prior_entropy",
-            Independent(OneHotCategorical(logits=priors_logits.detach()), 1).entropy().mean().detach(),
+            Independent(OneHotCategorical(logits=priors_logits.detach()), 1)
+            .entropy()
+            .mean()
+            .detach(),
         )
         aggregator.update("Loss/policy_loss", policy_loss.detach())
         aggregator.update("Loss/value_loss", value_loss.detach())
@@ -404,17 +431,23 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     is_continuous = isinstance(action_space, gym.spaces.Box)
     is_multidiscrete = isinstance(action_space, gym.spaces.MultiDiscrete)
     actions_dim = tuple(
-        action_space.shape if is_continuous else (action_space.nvec.tolist() if is_multidiscrete else [action_space.n])
+        action_space.shape
+        if is_continuous
+        else (action_space.nvec.tolist() if is_multidiscrete else [action_space.n])
     )
     clip_rewards_fn = lambda r: np.tanh(r) if cfg.env.clip_rewards else r
     if not isinstance(observation_space, gym.spaces.Dict):
-        raise RuntimeError(f"Unexpected observation type, should be of type Dict, got: {observation_space}")
+        raise RuntimeError(
+            f"Unexpected observation type, should be of type Dict, got: {observation_space}"
+        )
 
     if (
         len(set(cfg.algo.cnn_keys.encoder).intersection(set(cfg.algo.cnn_keys.decoder))) == 0
         and len(set(cfg.algo.mlp_keys.encoder).intersection(set(cfg.algo.mlp_keys.decoder))) == 0
     ):
-        raise RuntimeError("The CNN keys or the MLP keys of the encoder and decoder must not be disjointed")
+        raise RuntimeError(
+            "The CNN keys or the MLP keys of the encoder and decoder must not be disjointed"
+        )
     if len(set(cfg.algo.cnn_keys.decoder) - set(cfg.algo.cnn_keys.encoder)) > 0:
         raise RuntimeError(
             "The CNN keys of the decoder must be contained in the encoder ones. "
@@ -448,8 +481,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     world_optimizer = hydra.utils.instantiate(
         cfg.algo.world_model.optimizer, params=world_model.parameters(), _convert_="all"
     )
-    actor_optimizer = hydra.utils.instantiate(cfg.algo.actor.optimizer, params=actor.parameters(), _convert_="all")
-    critic_optimizer = hydra.utils.instantiate(cfg.algo.critic.optimizer, params=critic.parameters(), _convert_="all")
+    actor_optimizer = hydra.utils.instantiate(
+        cfg.algo.actor.optimizer, params=actor.parameters(), _convert_="all"
+    )
+    critic_optimizer = hydra.utils.instantiate(
+        cfg.algo.critic.optimizer, params=critic.parameters(), _convert_="all"
+    )
     if cfg.checkpoint.resume_from:
         world_optimizer.load_state_dict(state["world_optimizer"])
         actor_optimizer.load_state_dict(state["actor_optimizer"])
@@ -472,10 +509,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     # Metrics
     aggregator = None
     if not MetricAggregator.disabled:
-        aggregator: MetricAggregator = hydra.utils.instantiate(cfg.metric.aggregator, _convert_="all").to(device)
+        aggregator: MetricAggregator = hydra.utils.instantiate(
+            cfg.metric.aggregator, _convert_="all"
+        ).to(device)
 
     # Local data
-    buffer_size = cfg.buffer.size // int(cfg.env.num_envs * fabric.world_size) if not cfg.dry_run else 2
+    buffer_size = (
+        cfg.buffer.size // int(cfg.env.num_envs * fabric.world_size) if not cfg.dry_run else 2
+    )
     rb = EnvIndependentReplayBuffer(
         buffer_size,
         n_envs=cfg.env.num_envs,
@@ -489,7 +530,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         elif isinstance(state["rb"], EnvIndependentReplayBuffer):
             rb = state["rb"]
         else:
-            raise RuntimeError(f"Given {len(state['rb'])}, but {fabric.world_size} processes are instantiated")
+            raise RuntimeError(
+                f"Given {len(state['rb'])}, but {fabric.world_size} processes are instantiated"
+            )
 
     # Global variables
     train_step = 0
@@ -565,12 +608,16 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         actions = np.concatenate(
                             [
                                 F.one_hot(torch.as_tensor(act), act_dim).numpy()
-                                for act, act_dim in zip(actions.reshape(len(actions_dim), -1), actions_dim)
+                                for act, act_dim in zip(
+                                    actions.reshape(len(actions_dim), -1), actions_dim
+                                )
                             ],
                             axis=-1,
                         )
                 else:
-                    torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
+                    torch_obs = prepare_obs(
+                        fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs
+                    )
                     mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
                     if len(mask) == 0:
                         mask = None
@@ -580,7 +627,11 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         real_actions = torch.stack(real_actions, dim=-1).cpu().numpy()
                     else:
                         real_actions = (
-                            torch.stack([real_act.argmax(dim=-1) for real_act in real_actions], dim=-1).cpu().numpy()
+                            torch.stack(
+                                [real_act.argmax(dim=-1) for real_act in real_actions], dim=-1
+                            )
+                            .cpu()
+                            .numpy()
                         )
 
                 step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1))
@@ -615,7 +666,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         if aggregator and not aggregator.disabled:
                             aggregator.update("Rewards/rew_avg", ep_rew)
                             aggregator.update("Game/ep_len_avg", ep_len)
-                        fabric.print(f"Rank-0: policy_step={policy_step}, reward_env_{i}={ep_rew[-1]}")
+                        fabric.print(
+                            f"Rank-0: policy_step={policy_step}, reward_env_{i}={ep_rew[-1]}"
+                        )
 
             # Save the real next observation
             real_next_obs = copy.deepcopy(next_obs)
@@ -651,9 +704,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
                 # Reset already inserted step data
                 step_data["rewards"][:, dones_idxes] = np.zeros_like(reset_data["rewards"])
-                step_data["terminated"][:, dones_idxes] = np.zeros_like(step_data["terminated"][:, dones_idxes])
-                step_data["truncated"][:, dones_idxes] = np.zeros_like(step_data["truncated"][:, dones_idxes])
-                step_data["is_first"][:, dones_idxes] = np.ones_like(step_data["is_first"][:, dones_idxes])
+                step_data["terminated"][:, dones_idxes] = np.zeros_like(
+                    step_data["terminated"][:, dones_idxes]
+                )
+                step_data["truncated"][:, dones_idxes] = np.zeros_like(
+                    step_data["truncated"][:, dones_idxes]
+                )
+                step_data["is_first"][:, dones_idxes] = np.ones_like(
+                    step_data["is_first"][:, dones_idxes]
+                )
                 player.init_states(dones_idxes)
 
         # Train the agent
@@ -669,14 +728,23 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     device=fabric.device,
                     from_numpy=cfg.buffer.from_numpy,
                 )
-                with timer("Time/train_time", SumMetric, sync_on_compute=cfg.metric.sync_on_compute):
+                with timer(
+                    "Time/train_time", SumMetric, sync_on_compute=cfg.metric.sync_on_compute
+                ):
                     for i in range(per_rank_gradient_steps):
                         if (
-                            cumulative_per_rank_gradient_steps % cfg.algo.critic.per_rank_target_network_update_freq
+                            cumulative_per_rank_gradient_steps
+                            % cfg.algo.critic.per_rank_target_network_update_freq
                             == 0
                         ):
-                            tau = 1 if cumulative_per_rank_gradient_steps == 0 else cfg.algo.critic.tau
-                            for cp, tcp in zip(critic.module.parameters(), target_critic.parameters()):
+                            tau = (
+                                1
+                                if cumulative_per_rank_gradient_steps == 0
+                                else cfg.algo.critic.tau
+                            )
+                            for cp, tcp in zip(
+                                critic.module.parameters(), target_critic.parameters()
+                            ):
                                 tcp.data.copy_(tau * cp.data + (1 - tau) * tcp.data)
                         batch = {k: v[i].float() for k, v in local_data.items()}
                         train(
@@ -699,7 +767,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     train_step += world_size
 
         # Log metrics
-        if cfg.metric.log_level > 0 and (policy_step - last_log >= cfg.metric.log_every or iter_num == total_iters):
+        if cfg.metric.log_level > 0 and (
+            policy_step - last_log >= cfg.metric.log_every or iter_num == total_iters
+        ):
             # Sync distributed metrics
             if aggregator and not aggregator.disabled:
                 metrics_dict = aggregator.compute()
@@ -708,7 +778,9 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
             # Log replay ratio
             fabric.log(
-                "Params/replay_ratio", cumulative_per_rank_gradient_steps * world_size / policy_step, policy_step
+                "Params/replay_ratio",
+                cumulative_per_rank_gradient_steps * world_size / policy_step,
+                policy_step,
             )
 
             # Sync distributed timers
@@ -720,7 +792,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         (train_step - last_train) / timer_metrics["Time/train_time"],
                         policy_step,
                     )
-                if "Time/env_interaction_time" in timer_metrics and timer_metrics["Time/env_interaction_time"] > 0:
+                if (
+                    "Time/env_interaction_time" in timer_metrics
+                    and timer_metrics["Time/env_interaction_time"] > 0
+                ):
                     fabric.log(
                         "Time/sps_env_interaction",
                         ((policy_step - last_log) / world_size * cfg.env.action_repeat)

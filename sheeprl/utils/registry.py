@@ -19,12 +19,17 @@ def _register_algorithm(fn: Callable[..., Any], decoupled: bool = False) -> Call
     entrypoint = fn.__name__
     module_split = fn.__module__.split(".")
     algorithm = module_split[-1]
+    print(f"Registering algorithm: {algorithm}")
     module = ".".join(module_split[:-1])
     registered_algos = algorithm_registry.get(module, None)
     if registered_algos is None:
-        algorithm_registry[module] = [{"name": algorithm, "entrypoint": entrypoint, "decoupled": decoupled}]
+        algorithm_registry[module] = [
+            {"name": algorithm, "entrypoint": entrypoint, "decoupled": decoupled}
+        ]
     else:
-        algorithm_registry[module].append({"name": algorithm, "entrypoint": entrypoint, "decoupled": decoupled})
+        algorithm_registry[module].append(
+            {"name": algorithm, "entrypoint": entrypoint, "decoupled": decoupled}
+        )
 
     # add the decorated function to __all__ in algorithm
     mod = sys.modules[fn.__module__]

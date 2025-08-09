@@ -16,6 +16,7 @@ import numpy as np
 
 # fmt: off
 from sheeprl.algos.a2c import a2c  # noqa: F401
+from sheeprl.algos.dream_and_ponder import dream_and_ponder  # noqa: F401
 from sheeprl.algos.dreamer_v1 import dreamer_v1  # noqa: F401
 from sheeprl.algos.dreamer_v2 import dreamer_v2  # noqa: F401
 from sheeprl.algos.dreamer_v3 import dreamer_v3  # noqa: F401
@@ -34,6 +35,7 @@ from sheeprl.algos.sac import sac_decoupled  # noqa: F401
 from sheeprl.algos.sac_ae import sac_ae  # noqa: F401
 
 from sheeprl.algos.a2c import evaluate as a2c_evaluate  # noqa: F401, isort:skip
+from sheeprl.algos.dream_and_ponder import evaluate as dream_and_ponder_evaluate  # noqa: F401, isort:skip
 from sheeprl.algos.dreamer_v1 import evaluate as dreamer_v1_evaluate  # noqa: F401, isort:skip
 from sheeprl.algos.dreamer_v2 import evaluate as dreamer_v2_evaluate  # noqa: F401, isort:skip
 from sheeprl.algos.dreamer_v3 import evaluate as dreamer_v3_evaluate  # noqa: F401, isort:skip
@@ -80,7 +82,9 @@ def custom_use_clip_fps_by_default(func, clip, *args, **kwargs):
     names = inspect.getfullargspec(func).args[1:]
 
     new_args = [find_fps(arg) if (name == "fps") else arg for (arg, name) in zip(args, names)]
-    new_kwargs = {kwarg: find_fps(value) if kwarg == "fps" else value for (kwarg, value) in kwargs.items()}
+    new_kwargs = {
+        kwarg: find_fps(value) if kwarg == "fps" else value for (kwarg, value) in kwargs.items()
+    }
 
     return func(clip, *new_args, **new_kwargs)
 

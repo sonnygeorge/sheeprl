@@ -20,7 +20,7 @@ class PonderActorOutput:
     # Training mode outputs
     halt_step_outputs: Optional[torch.Tensor] = None
     halt_probs: Optional[torch.Tensor] = None
-    halting_distribution: Optional[torch.Tensor] = None
+    halt_distribution: Optional[torch.Tensor] = None
     # Inference mode outputs
     halted_at_output: Optional[torch.Tensor] = None
     halted_at_step: Optional[torch.Tensor] = None
@@ -38,25 +38,26 @@ class PonderActor(nn.Module):
 
     def __init__(
         self,
-        latent_space_dim: int,
-        recurrent_goal_module: nn.Module,
+        latent_state_dim: int,
+        goal_ponder_module: nn.Module,
         halt_module: nn.Module,
         action_decoder: nn.Module,
-        max_ponder_steps: int = 5,
+        max_ponder_steps: int = 4,
         cum_halt_prob_threshold: float = 0.95,
         deterministic_inference: bool = False,
     ):
         assert 0 < cum_halt_prob_threshold <= 1, "cum_halt_prob_threshold must be in (0, 1]"
         assert max_ponder_steps > 0, "max_ponder_steps must be positive"
         super().__init__()
-        self.latent_space_dim = latent_space_dim
-        self.recurrent_goal_module = recurrent_goal_module
+        self.training = True  # Default to training mode
+        self.latent_state_dim = latent_state_dim
+        self.goal_ponder_module = goal_ponder_module
         self.halt_module = halt_module
         self.action_decoder = action_decoder
         self.max_ponder_steps = max_ponder_steps
         self.cum_halt_prob_threshold = cum_halt_prob_threshold
         self.deterministic_inference = deterministic_inference
-        self.no_goal_yet_representation = nn.Parameter(torch.rand(latent_space_dim))
+        self.no_goal_yet_representation = nn.Parameter(torch.rand(latent_state_dim))
 
     def _compute_halting_distribution(self, halt_probs: torch.Tensor) -> torch.Tensor:
         """
@@ -100,7 +101,7 @@ class PonderActor(nn.Module):
         current_input = torch.cat([env_state, no_goal_yet], dim=-1)
         for step in range(self.max_ponder_steps):
             # Apply one more recurrent goal module forward pass
-            goal = self.recurrent_goal_module(current_input)
+            goal = self.goal_ponder_module(current_input)
 
             # Infer probability that inferred/refined goal is ready to be decoded as a next-action
             halt_module_input = torch.cat([env_state, goal], dim=-1)
@@ -122,7 +123,7 @@ class PonderActor(nn.Module):
         ########################
 
         # Flatten the halt steps dimension into the batch dimension for action decoding
-        all_goals = halt_step_goals.view(-1, self.latent_space_dim)
+        all_goals = halt_step_goals.view(-1, self.latent_state_dim)
         all_outputs: torch.Tensor = self.action_decoder(all_goals)
         # Reshape back to [batch, max_steps, action_dim]
         halt_step_outputs = all_outputs.view(batch_size, self.max_ponder_steps, -1)
@@ -131,7 +132,7 @@ class PonderActor(nn.Module):
             training_mode=True,
             halt_step_outputs=halt_step_outputs,
             halt_probs=halt_probs,
-            halting_distribution=halting_dist,
+            halt_distribution=halting_dist,
         )
 
     def _forward_inference(self, env_state: torch.Tensor) -> PonderActorOutput:
@@ -146,7 +147,7 @@ class PonderActor(nn.Module):
         batch_size = env_state.size(0)
         device = env_state.device
         has_halted = torch.zeros(batch_size, dtype=torch.bool, device=device)
-        halted_at_goal = torch.zeros(batch_size, self.latent_space_dim, device=device)
+        halted_at_goal = torch.zeros(batch_size, self.latent_state_dim, device=device)
         halted_at_steps = torch.zeros(batch_size, dtype=torch.long, device=device)
         cumulative_halt_prob = torch.zeros(batch_size, device=device)
 
@@ -158,13 +159,13 @@ class PonderActor(nn.Module):
                 break
 
             # Infer/refine goal & halt_prob only for still-pondering batch instances
-            goal_ = self.recurrent_goal_module(current_input[is_active])
+            goal_ = self.goal_ponder_module(current_input[is_active])
             halt_module_input = torch.cat([env_state[is_active], goal_], dim=-1)
             halt_prob_logit = self.halt_module(halt_module_input)
             halt_prob_logit = torch.clamp(halt_prob_logit, *self.PRE_SIGMOID_CLAMP)
             halt_prob_ = torch.sigmoid(halt_prob_logit).squeeze(-1)
             # Create full-batch equivalents of goal and halt_prob
-            goal = torch.zeros(batch_size, self.latent_space_dim, device=device)
+            goal = torch.zeros(batch_size, self.latent_state_dim, device=device)
             goal[is_active] = goal_
             halt_prob = torch.zeros(batch_size, device=device)
             halt_prob[is_active] = halt_prob_
@@ -256,8 +257,8 @@ class PonderActorLoss(nn.Module):
 
     def forward(
         self,
-        halt_step_task_losses: torch.Tensor,  # [batch, max_steps]
-        halting_distribution: torch.Tensor,  # [batch, max_steps]
+        halt_step_task_losses: torch.Tensor,  # [batch, max_ponder_steps]
+        halt_distribution: torch.Tensor,  # [batch, max_ponder_steps]
     ) -> torch.Tensor:
         """
         Compute PonderNet loss: expected task loss plus β-weighted KL divergence.
@@ -270,11 +271,11 @@ class PonderActorLoss(nn.Module):
             Combined loss (expected task loss + β * KL(p || p_G))
         """
         # Expected task loss under halting distribution
-        expected_loss = (halt_step_task_losses * halting_distribution).sum(dim=1).mean()
+        expected_loss = (halt_step_task_losses * halt_distribution).sum(dim=1).mean()
         # KL divergence: KL(p || q) = sum(p * log(p/q))
         eps = 1e-8  # Small constant for numerical stability & avoiding log(0)
-        kl_div = torch.log((halting_distribution + eps) / (self.geometric_prior + eps))
-        kl_div = (halting_distribution * kl_div).sum(dim=1).mean()
+        kl_div = torch.log((halt_distribution + eps) / (self.geometric_prior + eps))
+        kl_div = (halt_distribution * kl_div).sum(dim=1).mean()
         # Combined loss
         loss = expected_loss + self.beta * kl_div
         return loss

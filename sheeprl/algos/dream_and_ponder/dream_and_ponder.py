@@ -20,9 +20,10 @@ from torch.distributions import Distribution, Independent, OneHotCategorical
 from torch.optim import Optimizer
 from torchmetrics import SumMetric
 
-from sheeprl.algos.dreamer_v3.agent import WorldModel, build_agent
-from sheeprl.algos.dreamer_v3.loss import reconstruction_loss
-from sheeprl.algos.dreamer_v3.utils import Moments, compute_lambda_values, prepare_obs, test
+from sheeprl.algos.dream_and_ponder.agent import WorldModel, build_agent
+from sheeprl.algos.dream_and_ponder.ponder_actor import PonderActorOutput, PonderActorLoss
+from sheeprl.algos.dream_and_ponder.loss import reconstruction_loss
+from sheeprl.algos.dream_and_ponder.utils import Moments, compute_lambda_values, prepare_obs, test
 from sheeprl.data.buffers import EnvIndependentReplayBuffer, SequentialReplayBuffer
 from sheeprl.envs.wrappers import RestartOnException
 from sheeprl.utils.distribution import (
@@ -92,6 +93,8 @@ def train(
     recurrent_state_size = cfg.algo.world_model.recurrent_model.recurrent_state_size
     stochastic_size = cfg.algo.world_model.stochastic_size
     discrete_size = cfg.algo.world_model.discrete_size
+    max_ponder_steps = cfg.algo.max_ponder_steps
+    ponder_loss = PonderActorLoss(max_ponder_steps, lambda_prior_geom=cfg.algo.lambda_prior_geom)
     device = fabric.device
     batch_obs = {k: data[k] / 255.0 - 0.5 for k in cfg.algo.cnn_keys.encoder}
     batch_obs.update({k: data[k] for k in cfg.algo.mlp_keys.encoder})
@@ -206,118 +209,151 @@ def train(
     world_optimizer.step()
 
     # Behaviour Learning
+    imagined_trajectories_across_halt_steps = [
+        torch.empty(
+            cfg.algo.horizon + 1,
+            batch_size * sequence_length,
+            stoch_state_size + recurrent_state_size,
+            device=device,
+        )
+        for _ in range(max_ponder_steps)
+    ]
+    imagined_actions_across_halt_steps = [
+        torch.empty(
+            cfg.algo.horizon + 1,
+            batch_size * sequence_length,
+            data["actions"].shape[-1],
+            device=device,
+        )
+        for _ in range(max_ponder_steps)
+    ]
+
+    # Set the starts of all imagined trajectories to the posterior
     imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)
     recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
     imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
-    imagined_trajectories = torch.empty(
-        cfg.algo.horizon + 1,
-        batch_size * sequence_length,  # Number of total imagined trajectories
-        stoch_state_size + recurrent_state_size,
-        device=device,
-    )
-    imagined_trajectories[0] = imagined_latent_state
-    imagined_actions = torch.empty(
-        cfg.algo.horizon + 1,
-        batch_size * sequence_length,  # Number of total imagined trajectories
-        data["actions"].shape[-1],
-        device=device,
-    )
-    # In this line of code, we sample an action for all 1024 (64*16) latent observations in train step
-    actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
-    # Here, we set this as the first imagined action for all 1024 imagined trajectories
-    # TODO: The actor, instead of returning [1, per_rank_batch_size*per_rank_sequence_length, action_dim],
-    # will return a tuple of actions, halt probs ([1, max_halts, ", "], [1, max_halts, 1])
-    # TODO: What is the first dimension here?
-    # TODO: Maintain this max_halts dimension (imagining trajectories for all halts), all the way up until loss calc
-    # TODO: After which, we calculate the halt-prob-aggregated PonderNet loss and backward() from that
-    imagined_actions[0] = actions
+    for imagined_trajectories in imagined_trajectories_across_halt_steps:
+        imagined_trajectories[0] = imagined_latent_state
 
-    # The imagination goes like this, with H=3:
-    # Actions:           a'0      a'1      a'2     a'4
-    #                    ^ \      ^ \      ^ \     ^
-    #                   /   \    /   \    /   \   /
-    #                  /     \  /     \  /     \ /
-    # States:        z0 ---> z'1 ---> z'2 ---> z'3
-    # Rewards:       r'0     r'1      r'2      r'3
-    # Values:        v'0     v'1      v'2      v'3
-    # Lambda-values:         l'1      l'2      l'3
-    # Continues:     c0      c'1      c'2      c'3
-    # where z0 comes from the posterior, while z'i is the imagined states (prior)
+    # Sample initial action in training mode for all halt steps
+    actor.training = True
+    all_actor_output_objects: tuple[PonderActorOutput] = actor(imagined_latent_state.detach())[0]
+    assert len(all_actor_output_objects) == 1
+    # Shape (of below): [batch, max_ponder_steps, num_actions]
+    halt_distributions = all_actor_output_objects[0].halt_distribution
+    actions_across_halt_steps = all_actor_output_objects[0].halt_step_outputs
+    for i in range(max_ponder_steps):
+        actions_at_halt_step = actions_across_halt_steps[:, i, :]
+        assert len(actions_at_halt_step.shape) == 2  # Shape: (batch_size, num_actions)
+        imagined_actions_across_halt_steps[i][0] = actions_at_halt_step
 
-    # Imagine trajectories in the latent space
-    for i in range(1, cfg.algo.horizon + 1):
-        imagined_prior, recurrent_state = world_model.rssm.imagination(
-            imagined_prior, recurrent_state, actions
+    actor.training = False  # Unset this so actor only returns 1 action in future imagination steps
+    policy_loss_across_halt_steps = torch.empty(max_ponder_steps, device=device)
+    for i in range(max_ponder_steps):
+        # The imagination goes like this, with H=3:
+        # Actions:           a'0      a'1      a'2     a'4
+        #                    ^ \      ^ \      ^ \     ^
+        #                   /   \    /   \    /   \   /
+        #                  /     \  /     \  /     \ /
+        # States:        z0 ---> z'1 ---> z'2 ---> z'3
+        # Rewards:       r'0     r'1      r'2      r'3
+        # Values:        v'0     v'1      v'2      v'3
+        # Lambda-values:         l'1      l'2      l'3
+        # Continues:     c0      c'1      c'2      c'3
+        # where z0 comes from the posterior, while z'i is the imagined states (prior)
+
+        # Imagine trajectories in the latent space
+        for i in range(1, cfg.algo.horizon + 1):
+            imagined_prior, recurrent_state = world_model.rssm.imagination(
+                imagined_prior, recurrent_state, actions_across_halt_steps
+            )
+            imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
+            imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+            imagined_trajectories_across_halt_steps[i] = imagined_latent_state
+            # actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+            all_actor_output_objects = actor(imagined_latent_state.detach())[0]
+            assert len(all_actor_output_objects) == 1  # Sanity check... TODO: remove
+            actions_across_halt_steps = all_actor_output_objects[0].halt_step_outputs
+            imagined_actions_across_halt_steps[i] = actions_across_halt_steps
+
+        # Predict values, rewards and continues
+        predicted_values = TwoHotEncodingDistribution(
+            critic(imagined_trajectories_across_halt_steps), dims=1
+        ).mean
+        predicted_rewards = TwoHotEncodingDistribution(
+            world_model.reward_model(imagined_trajectories_across_halt_steps), dims=1
+        ).mean
+        continues = Independent(
+            BernoulliSafeMode(
+                logits=world_model.continue_model(imagined_trajectories_across_halt_steps)
+            ),
+            1,
+        ).mode
+        true_continue = (1 - data["terminated"]).flatten().reshape(1, -1, 1)
+        continues = torch.cat((true_continue, continues[1:]))
+
+        # Estimate lambda-values
+        lambda_values = compute_lambda_values(
+            predicted_rewards[1:],
+            predicted_values[1:],
+            continues[1:] * cfg.algo.gamma,
+            lmbda=cfg.algo.lmbda,
         )
-        imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
-        imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
-        imagined_trajectories[i] = imagined_latent_state
-        actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
-        imagined_actions[i] = actions
 
-    # Predict values, rewards and continues
-    predicted_values = TwoHotEncodingDistribution(critic(imagined_trajectories), dims=1).mean
-    predicted_rewards = TwoHotEncodingDistribution(
-        world_model.reward_model(imagined_trajectories), dims=1
-    ).mean
-    continues = Independent(
-        BernoulliSafeMode(logits=world_model.continue_model(imagined_trajectories)), 1
-    ).mode
-    true_continue = (1 - data["terminated"]).flatten().reshape(1, -1, 1)
-    continues = torch.cat((true_continue, continues[1:]))
+        # Compute the discounts to multiply the lambda values to
+        with torch.no_grad():
+            discount = torch.cumprod(continues * cfg.algo.gamma, dim=0) / cfg.algo.gamma
 
-    # Estimate lambda-values
-    lambda_values = compute_lambda_values(
-        predicted_rewards[1:],
-        predicted_values[1:],
-        continues[1:] * cfg.algo.gamma,
-        lmbda=cfg.algo.lmbda,
-    )
+        # Actor optimization step. Eq. 11 from the paper
+        # Given the following diagram, with H=3
+        # Actions:          [a'0]    [a'1]    [a'2]    a'3
+        #                    ^ \      ^ \      ^ \     ^
+        #                   /   \    /   \    /   \   /
+        #                  /     \  /     \  /     \ /
+        # States:       [z0] -> [z'1] -> [z'2] ->  z'3
+        # Values:       [v'0]   [v'1]    [v'2]     v'3
+        # Lambda-values:        [l'1]    [l'2]    [l'3]
+        # Entropies:    [e'0]   [e'1]    [e'2]
+        actor_optimizer.zero_grad(set_to_none=True)
+        policies: Sequence[Distribution]
+        policies = actor(imagined_trajectories_across_halt_steps.detach())[1]
 
-    # Compute the discounts to multiply the lambda values to
-    with torch.no_grad():
-        discount = torch.cumprod(continues * cfg.algo.gamma, dim=0) / cfg.algo.gamma
-
-    # Actor optimization step. Eq. 11 from the paper
-    # Given the following diagram, with H=3
-    # Actions:          [a'0]    [a'1]    [a'2]    a'3
-    #                    ^ \      ^ \      ^ \     ^
-    #                   /   \    /   \    /   \   /
-    #                  /     \  /     \  /     \ /
-    # States:       [z0] -> [z'1] -> [z'2] ->  z'3
-    # Values:       [v'0]   [v'1]    [v'2]     v'3
-    # Lambda-values:        [l'1]    [l'2]    [l'3]
-    # Entropies:    [e'0]   [e'1]    [e'2]
-    actor_optimizer.zero_grad(set_to_none=True)
-    policies: Sequence[Distribution] = actor(imagined_trajectories.detach())[1]
-
-    baseline = predicted_values[:-1]
-    offset, invscale = moments(lambda_values, fabric)
-    normed_lambda_values = (lambda_values - offset) / invscale
-    normed_baseline = (baseline - offset) / invscale
-    advantage = normed_lambda_values - normed_baseline
-    if is_continuous:
-        objective = advantage
-    else:
-        objective = (
-            torch.stack(
-                [
-                    p.log_prob(imgnd_act.detach()).unsqueeze(-1)[:-1]
-                    for p, imgnd_act in zip(
-                        policies, torch.split(imagined_actions, actions_dim, dim=-1)
-                    )
-                ],
-                dim=-1,
+        baseline = predicted_values[:-1]
+        offset, invscale = moments(lambda_values, fabric)
+        normed_lambda_values = (lambda_values - offset) / invscale
+        normed_baseline = (baseline - offset) / invscale
+        advantage = normed_lambda_values - normed_baseline
+        if is_continuous:
+            objective = advantage
+        else:
+            objective = (
+                torch.stack(
+                    [
+                        p.log_prob(imgnd_act.detach()).unsqueeze(-1)[:-1]
+                        for p, imgnd_act in zip(
+                            policies,
+                            torch.split(imagined_actions_across_halt_steps, actions_dim, dim=-1),
+                        )
+                    ],
+                    dim=-1,
+                ).sum(dim=-1)
+                * advantage.detach()
+            )
+        try:
+            entropy = cfg.algo.actor.ent_coef * torch.stack(
+                [p.entropy() for p in policies], -1
             ).sum(dim=-1)
-            * advantage.detach()
+        except NotImplementedError:
+            entropy = torch.zeros_like(objective)
+
+        inv_policy_loss_before_mean = discount[:-1].detach() * (
+            objective + entropy.unsqueeze(dim=-1)[:-1]
         )
-    try:
-        entropy = cfg.algo.actor.ent_coef * torch.stack([p.entropy() for p in policies], -1).sum(
-            dim=-1
-        )
-    except NotImplementedError:
-        entropy = torch.zeros_like(objective)
-    policy_loss = -torch.mean(discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1]))
+        # Mean over the horizon dimension only, resulting in shape: (batch_size, max_ponder_steps)
+        mean_policy_loss_per_imagined_trajectory = -inv_policy_loss_before_mean.mean(dim=0)
+        policy_loss_across_halt_steps[i] = mean_policy_loss_per_imagined_trajectory
+
+    policy_loss = ponder_loss(torch.stack(policy_loss_across_halt_steps, dim=0), halt_distributions)
     fabric.backward(policy_loss)
     actor_grads = None
     if cfg.algo.actor.clip_gradients is not None and cfg.algo.actor.clip_gradients > 0:
@@ -329,10 +365,14 @@ def train(
         )
     actor_optimizer.step()
 
+    # Stack along the batch dim
+    # (turning it into batch_size * sequence_length * max_ponder_steps)
+    all_imagined_trajectories = torch.stack(imagined_trajectories_across_halt_steps, dim=1)
+
     # Predict the values
-    qv = TwoHotEncodingDistribution(critic(imagined_trajectories.detach()[:-1]), dims=1)
+    qv = TwoHotEncodingDistribution(critic(all_imagined_trajectories.detach()[:-1]), dims=1)
     predicted_target_values = TwoHotEncodingDistribution(
-        target_critic(imagined_trajectories.detach()[:-1]), dims=1
+        target_critic(all_imagined_trajectories.detach()[:-1]), dims=1
     ).mean
 
     # Critic optimization. Eq. 10 in the paper

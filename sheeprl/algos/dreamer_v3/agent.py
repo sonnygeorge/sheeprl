@@ -798,42 +798,42 @@ class Actor(nn.Module):
             The tensor of the actions taken by the agent with shape (batch_size, *, num_actions).
             The distribution of the actions
         """
-        out: Tensor = self.model(state)
-        pre_dist: List[Tensor] = [head(out) for head in self.mlp_heads]
+        out: Tensor = self.model(state)  # Shape: (batch_size, *, model_output_size)
+        pre_dist: List[Tensor] = [head(out) for head in self.mlp_heads]  # Shape per head: (batch_size, *, num_actions | num_actions*2)
         if self.is_continuous:
-            mean, std = torch.chunk(pre_dist[0], 2, -1)
+            mean, std = torch.chunk(pre_dist[0], 2, -1)  # Shape each: (batch_size, *, num_actions)
             if self.distribution == "tanh_normal":
-                mean = 5 * torch.tanh(mean / 5)
-                std = F.softplus(std + self.init_std) + self.min_std
-                actions_dist = Normal(mean, std)
-                actions_dist = Independent(TransformedDistribution(actions_dist, TanhTransform()), 1)
+                mean = 5 * torch.tanh(mean / 5)  # Shape: (batch_size, *, num_actions)
+                std = F.softplus(std + self.init_std) + self.min_std  # Shape: (batch_size, *, num_actions)
+                actions_dist = Normal(mean, std)  # Shape: (batch_size, *, num_actions)
+                actions_dist = Independent(TransformedDistribution(actions_dist, TanhTransform()), 1)  # Shape: (batch_size, *, num_actions)
             elif self.distribution == "normal":
-                actions_dist = Normal(mean, std)
-                actions_dist = Independent(actions_dist, 1)
+                actions_dist = Normal(mean, std)  # Shape: (batch_size, *, num_actions)
+                actions_dist = Independent(actions_dist, 1)  # Shape: (batch_size, *, num_actions)
             elif self.distribution == "scaled_normal":
-                std = (self.max_std - self.min_std) * torch.sigmoid(std + self.init_std) + self.min_std
-                dist = Normal(torch.tanh(mean), std)
-                actions_dist = Independent(dist, 1)
+                std = (self.max_std - self.min_std) * torch.sigmoid(std + self.init_std) + self.min_std  # Shape: (batch_size, *, num_actions)
+                dist = Normal(torch.tanh(mean), std)  # Shape: (batch_size, *, num_actions)
+                actions_dist = Independent(dist, 1)  # Shape: (batch_size, *, num_actions)
             if not greedy:
-                actions = actions_dist.rsample()
+                actions = actions_dist.rsample()  # Shape: (batch_size, *, num_actions)
             else:
-                sample = actions_dist.sample((100,))
-                log_prob = actions_dist.log_prob(sample)
-                actions = sample[log_prob.argmax(0)].view(1, 1, -1)
+                sample = actions_dist.sample((100,))  # Shape: (100, batch_size, *, num_actions)
+                log_prob = actions_dist.log_prob(sample)  # Shape: (100, batch_size, *)
+                actions = sample[log_prob.argmax(0)].view(1, 1, -1)  # Shape: (1, 1, num_actions)
             if self._action_clip > 0.0:
-                action_clip = torch.full_like(actions, self._action_clip)
-                actions = actions * (action_clip / torch.maximum(action_clip, torch.abs(actions))).detach()
-            actions = [actions]
-            actions_dist = [actions_dist]
+                action_clip = torch.full_like(actions, self._action_clip)  # Shape: same as actions (1, 1, num_actions) or (batch_size, *, num_actions)
+                actions = actions * (action_clip / torch.maximum(action_clip, torch.abs(actions))).detach()  # Shape: same as actions
+            actions = [actions]  # Shape: [(batch_size, *, num_actions)] or [(1, 1, num_actions)]
+            actions_dist = [actions_dist]  # Shape: [(batch_size, *, num_actions)]
         else:
             actions_dist: List[Distribution] = []
             actions: List[Tensor] = []
-            for logits in pre_dist:
-                actions_dist.append(OneHotCategoricalStraightThrough(logits=self._uniform_mix(logits)))
+            for logits in pre_dist:  # Shape per logits: (batch_size, *, num_actions)
+                actions_dist.append(OneHotCategoricalStraightThrough(logits=self._uniform_mix(logits)))  # Shape: (batch_size, *, num_actions)
                 if not greedy:
-                    actions.append(actions_dist[-1].rsample())
+                    actions.append(actions_dist[-1].rsample())  # Shape: (batch_size, *, num_actions)
                 else:
-                    actions.append(actions_dist[-1].mode)
+                    actions.append(actions_dist[-1].mode)  # Shape: (batch_size, *, num_actions)
         return tuple(actions), tuple(actions_dist)
 
     def _uniform_mix(self, logits: Tensor) -> Tensor:

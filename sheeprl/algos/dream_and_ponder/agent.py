@@ -758,7 +758,7 @@ class Actor(nn.Module):
                 self.distribution = "scaled_normal"
             else:
                 self.distribution = "discrete"
-        self.model = MLP(
+        self.model = MLP(  # PonderActor replaces this MLP
             input_dims=latent_state_size,
             output_dim=None,
             hidden_sizes=[dense_units] * mlp_layers,
@@ -834,7 +834,7 @@ class Actor(nn.Module):
                     actions.append(actions_dist[-1].rsample())
                 else:
                     actions.append(actions_dist[-1].mode)
-        return tuple(actions), tuple(actions_dist)
+        return tuple(actions), tuple(actions_dist)  # Replace with GoalPonderNet's output w/ max_halt_steps dimension & halt_probs (training mode) & regular actions (inference mode)
 
     def _uniform_mix(self, logits: Tensor) -> Tensor:
         if self._unimix > 0.0:

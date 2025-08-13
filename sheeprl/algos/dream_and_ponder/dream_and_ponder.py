@@ -97,6 +97,7 @@ def train(
     lambda_prior_geom = cfg.algo.ponder.lambda_prior_geom
     ponder_loss = PonderActorLoss(max_ponder_steps, lambda_prior_geom=lambda_prior_geom)
     device = fabric.device
+    ponder_loss.to(device)
     batch_obs = {k: data[k] / 255.0 - 0.5 for k in cfg.algo.cnn_keys.encoder}
     batch_obs.update({k: data[k] for k in cfg.algo.mlp_keys.encoder})
     data["is_first"][0, :] = torch.ones_like(data["is_first"][0, :])

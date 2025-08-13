@@ -93,8 +93,9 @@ def train(
     recurrent_state_size = cfg.algo.world_model.recurrent_model.recurrent_state_size
     stochastic_size = cfg.algo.world_model.stochastic_size
     discrete_size = cfg.algo.world_model.discrete_size
-    max_ponder_steps = cfg.algo.max_ponder_steps
-    ponder_loss = PonderActorLoss(max_ponder_steps, lambda_prior_geom=cfg.algo.lambda_prior_geom)
+    max_ponder_steps = cfg.algo.ponder.max_ponder_steps
+    lambda_prior_geom = cfg.algo.ponder.lambda_prior_geom
+    ponder_loss = PonderActorLoss(max_ponder_steps, lambda_prior_geom=lambda_prior_geom)
     device = fabric.device
     batch_obs = {k: data[k] / 255.0 - 0.5 for k in cfg.algo.cnn_keys.encoder}
     batch_obs.update({k: data[k] for k in cfg.algo.mlp_keys.encoder})
@@ -229,9 +230,13 @@ def train(
     ]
 
     # Set the starts of all imagined trajectories to the posterior
-    imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)
-    recurrent_state = recurrent_states.detach().reshape(1, -1, recurrent_state_size)
-    imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+    imagined_prior = posteriors.detach().reshape(1, -1, stoch_state_size)  # [1, 16*64(1024), 1024]
+    recurrent_state = recurrent_states.detach().reshape(
+        1, -1, recurrent_state_size
+    )  # [1, 16*64(1024), 512]
+    imagined_latent_state = torch.cat(
+        (imagined_prior, recurrent_state), -1
+    )  # [1, 16*64(1024), 1536]
     for imagined_trajectories in imagined_trajectories_across_halt_steps:
         imagined_trajectories[0] = imagined_latent_state
 
@@ -243,8 +248,8 @@ def train(
     halt_distributions = all_actor_output_objects[0].halt_distribution
     actions_across_halt_steps = all_actor_output_objects[0].halt_step_outputs
     for i in range(max_ponder_steps):
-        actions_at_halt_step = actions_across_halt_steps[:, i, :]
-        assert len(actions_at_halt_step.shape) == 2  # Shape: (batch_size, num_actions)
+        actions_at_halt_step = actions_across_halt_steps[:, :, i, :]
+        assert len(actions_at_halt_step.shape) == 3  # Shape: (1, 16*64, num_actions)
         imagined_actions_across_halt_steps[i][0] = actions_at_halt_step
 
     actor.training = False  # Unset this so actor only returns 1 action in future imagination steps
@@ -263,29 +268,29 @@ def train(
         # where z0 comes from the posterior, while z'i is the imagined states (prior)
 
         # Imagine trajectories in the latent space
-        for i in range(1, cfg.algo.horizon + 1):
+        actions = imagined_actions_across_halt_steps[i][0:1]
+        for j in range(1, cfg.algo.horizon + 1):
             imagined_prior, recurrent_state = world_model.rssm.imagination(
-                imagined_prior, recurrent_state, actions_across_halt_steps
+                imagined_prior, recurrent_state, actions
             )
             imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
             imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
-            imagined_trajectories_across_halt_steps[i] = imagined_latent_state
-            # actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+            imagined_trajectories_across_halt_steps[i][j] = imagined_latent_state
             all_actor_output_objects = actor(imagined_latent_state.detach())[0]
-            assert len(all_actor_output_objects) == 1  # Sanity check... TODO: remove
-            actions_across_halt_steps = all_actor_output_objects[0].halt_step_outputs
-            imagined_actions_across_halt_steps[i] = actions_across_halt_steps
+            assert len(all_actor_output_objects) == 1
+            actions = all_actor_output_objects[0].halted_at_output
+            imagined_actions_across_halt_steps[i][j] = actions
 
         # Predict values, rewards and continues
         predicted_values = TwoHotEncodingDistribution(
-            critic(imagined_trajectories_across_halt_steps), dims=1
+            critic(imagined_trajectories_across_halt_steps[i]), dims=1
         ).mean
         predicted_rewards = TwoHotEncodingDistribution(
-            world_model.reward_model(imagined_trajectories_across_halt_steps), dims=1
+            world_model.reward_model(imagined_trajectories_across_halt_steps[i]), dims=1
         ).mean
         continues = Independent(
             BernoulliSafeMode(
-                logits=world_model.continue_model(imagined_trajectories_across_halt_steps)
+                logits=world_model.continue_model(imagined_trajectories_across_halt_steps[i])
             ),
             1,
         ).mode
@@ -316,7 +321,7 @@ def train(
         # Entropies:    [e'0]   [e'1]    [e'2]
         actor_optimizer.zero_grad(set_to_none=True)
         policies: Sequence[Distribution]
-        policies = actor(imagined_trajectories_across_halt_steps.detach())[1]
+        policies = actor(imagined_trajectories_across_halt_steps[i].detach())[1]
 
         baseline = predicted_values[:-1]
         offset, invscale = moments(lambda_values, fabric)
@@ -332,7 +337,7 @@ def train(
                         p.log_prob(imgnd_act.detach()).unsqueeze(-1)[:-1]
                         for p, imgnd_act in zip(
                             policies,
-                            torch.split(imagined_actions_across_halt_steps, actions_dim, dim=-1),
+                            torch.split(imagined_actions_across_halt_steps[i], actions_dim, dim=-1),
                         )
                     ],
                     dim=-1,
@@ -346,14 +351,11 @@ def train(
         except NotImplementedError:
             entropy = torch.zeros_like(objective)
 
-        inv_policy_loss_before_mean = discount[:-1].detach() * (
-            objective + entropy.unsqueeze(dim=-1)[:-1]
+        policy_loss_across_halt_steps[i] = -torch.mean(
+            discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1])
         )
-        # Mean over the horizon dimension only, resulting in shape: (batch_size, max_ponder_steps)
-        mean_policy_loss_per_imagined_trajectory = -inv_policy_loss_before_mean.mean(dim=0)
-        policy_loss_across_halt_steps[i] = mean_policy_loss_per_imagined_trajectory
 
-    policy_loss = ponder_loss(torch.stack(policy_loss_across_halt_steps, dim=0), halt_distributions)
+    policy_loss = ponder_loss(policy_loss_across_halt_steps, halt_distributions)
     fabric.backward(policy_loss)
     actor_grads = None
     if cfg.algo.actor.clip_gradients is not None and cfg.algo.actor.clip_gradients > 0:

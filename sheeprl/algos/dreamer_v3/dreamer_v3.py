@@ -246,6 +246,7 @@ def train(
         )
         imagined_prior = imagined_prior.view(1, -1, stoch_state_size)
         imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+
         imagined_trajectories[i] = imagined_latent_state
         actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
         imagined_actions[i] = actions
@@ -290,7 +291,7 @@ def train(
     offset, invscale = moments(lambda_values, fabric)
     normed_lambda_values = (lambda_values - offset) / invscale
     normed_baseline = (baseline - offset) / invscale
-    advantage = normed_lambda_values - normed_baseline
+    advantage = normed_lambda_values - normed_baseline  # Shape: (3, 1024, 1)
     if is_continuous:
         objective = advantage
     else:
@@ -312,6 +313,10 @@ def train(
         )
     except NotImplementedError:
         entropy = torch.zeros_like(objective)
+
+    # Entropy shape: (4, 1024)
+    # Objective shape: (3, 1024, 1)
+
     policy_loss = -torch.mean(discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1]))
     fabric.backward(policy_loss)
     actor_grads = None

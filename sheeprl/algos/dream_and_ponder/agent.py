@@ -735,9 +735,11 @@ class PlayerDV3(nn.Module):
         self.stochastic_state = self.stochastic_state.view(
             *self.stochastic_state.shape[:-2], self.stochastic_size * self.discrete_size
         )
-        actions, _ = self.actor(
+        self.actor.training = False  # Don't get actions for all ponder steps
+        ponder_actor_output_objs, _ = self.actor(
             torch.cat((self.stochastic_state, self.recurrent_state), -1), greedy, mask
         )
+        actions = [obj.halted_at_output for obj in ponder_actor_output_objs]
         self.actions = torch.cat(actions, -1)
         return actions
 
@@ -789,11 +791,14 @@ class Actor(nn.Module):
         dense_units: int = 1024,
         activation: nn.Module = nn.SiLU,
         mlp_layers: int = 5,
+        max_ponder_steps: int = 4,
+        cum_halt_prob_threshold: float = 0.9,
         layer_norm_cls: Callable[..., nn.Module] = LayerNorm,
         layer_norm_kw: Dict[str, Any] = {"eps": 1e-3},
         unimix: float = 0.01,
         action_clip: float = 1.0,
     ) -> None:
+        print("Latent state size:", latent_state_size)
         super().__init__()
         self.training = True  # Default to training mode
         self.distribution_cfg = distribution_cfg
@@ -814,7 +819,7 @@ class Actor(nn.Module):
         goal_ponder_module = MLP(
             input_dims=latent_state_size * 2,  # current state + goal
             output_dim=latent_state_size,  # refined goal
-            hidden_sizes=[dense_units] * math.ciel(mlp_layers * 0.8),
+            hidden_sizes=[dense_units] * math.ceil(mlp_layers * 0.8),
             activation=activation,
             flatten_dim=None,
             layer_args={"bias": layer_norm_cls == nn.Identity},
@@ -846,9 +851,8 @@ class Actor(nn.Module):
             goal_ponder_module=goal_ponder_module,
             halt_module=halt_module,
             action_decoder=action_decoder,
-            dense_units=dense_units,
-            max_ponder_steps=5,  # TODO: make this configurable
-            cum_halt_prob_threshold=0.95,  # TODO: make this configurable
+            max_ponder_steps=max_ponder_steps,
+            cum_halt_prob_threshold=cum_halt_prob_threshold,
         )
         if is_continuous:
             self.mlp_heads = nn.ModuleList([nn.Linear(dense_units, np.sum(actions_dim) * 2)])
@@ -863,6 +867,7 @@ class Actor(nn.Module):
         self.max_std = max_std
         self._unimix = unimix
         self._action_clip = action_clip
+        self.max_ponder_steps = max_ponder_steps
 
     def forward(
         self, state: Tensor, greedy: bool = False, mask: Optional[Dict[str, Tensor]] = None
@@ -882,11 +887,30 @@ class Actor(nn.Module):
             The tensor of the actions taken by the agent with shape (batch_size, *, num_actions).
             The distribution of the actions
         """
-        assert state.dim() == 2, "State expected to be 2D: (batch_size, latent_state_size)"
+        # assert state.dim() == 2, "State expected to be 2D: (batch_size, latent_state_size)"
 
         # Do inference pass through the ponder actor model
         self.model.training = self.training  # Sync training mode
+
+        assert len(state.shape) == 3
+        first_dim = state.shape[0]
+        second_dim = state.shape[1]
+        # Flatten the first dim into the second dim
+        state = state.view(-1, state.shape[-1])
         out: PonderActorOutput = self.model(state)
+        # Reshape to get back that first dimension after passing through ponder actor model
+        if self.training:
+            out.halt_distribution = out.halt_distribution.view(
+                first_dim, second_dim, self.max_ponder_steps
+            )
+            out.halt_step_outputs = out.halt_step_outputs.view(
+                first_dim, second_dim, self.max_ponder_steps, out.halt_step_outputs.shape[-1]
+            )
+            out.halt_probs = out.halt_probs.view(first_dim, second_dim, self.max_ponder_steps)
+        else:
+            out.halted_at_output = out.halted_at_output.view(
+                first_dim, second_dim, out.halted_at_output.shape[-1]
+            )
 
         # Pass through head that turns logits into action distribution
         if self.training:
@@ -950,7 +974,7 @@ class Actor(nn.Module):
 
         # Create PonderActorOutput output object for sampled actions
         if self.training:
-            actions = (
+            actions = [
                 PonderActorOutput(
                     training_mode=True,
                     halt_step_outputs=a,
@@ -958,9 +982,9 @@ class Actor(nn.Module):
                     halt_distribution=out.halt_distribution,
                 )
                 for a in actions
-            )
+            ]
         else:
-            actions = (
+            actions = [
                 PonderActorOutput(
                     training_mode=False,
                     halted_at_output=a,
@@ -968,8 +992,8 @@ class Actor(nn.Module):
                     halt_distribution=out.halt_distribution,
                 )
                 for a in actions
-            )
-        return actions, tuple(actions_dist)
+            ]
+        return tuple(actions), tuple(actions_dist)
 
     def _uniform_mix(self, logits: Tensor) -> Tensor:
         if self._unimix > 0.0:
@@ -1116,6 +1140,7 @@ def build_agent(
     world_model_cfg = cfg.algo.world_model
     actor_cfg = cfg.algo.actor
     critic_cfg = cfg.algo.critic
+    ponder_cfg = cfg.algo.ponder
 
     # Sizes
     recurrent_state_size = world_model_cfg.recurrent_model.recurrent_state_size
@@ -1306,6 +1331,8 @@ def build_agent(
         layer_norm_kw=actor_cfg.layer_norm.kw,
         unimix=cfg.algo.unimix,
         action_clip=actor_cfg.action_clip,
+        max_ponder_steps=ponder_cfg.max_ponder_steps,
+        cum_halt_prob_threshold=ponder_cfg.cum_halt_prob_threshold,
     )
 
     critic_ln_cls = hydra.utils.get_class(critic_cfg.layer_norm.cls)

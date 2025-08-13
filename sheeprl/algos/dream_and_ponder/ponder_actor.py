@@ -244,12 +244,12 @@ class PonderActorLoss(nn.Module):
         geometric_prior = self._compute_geometric_prior(max_ponder_steps)
         self.register_buffer("geometric_prior", geometric_prior.unsqueeze(0))
 
-    def _compute_geometric_prior(self, max_steps: int) -> torch.Tensor:
+    def _compute_geometric_prior(self, max_ponder_steps: int) -> torch.Tensor:
         """
         Compute truncated geometric prior distribution.
         p_G(n) = λ_p * (1 - λ_p)^(n-1) normalized over finite steps.
         """
-        n = torch.arange(max_steps)
+        n = torch.arange(max_ponder_steps)
         geometric_prior = self.lambda_prior_geom * (1 - self.lambda_prior_geom) ** n
         # Normalize to sum to 1 over truncated support
         geometric_prior = geometric_prior / geometric_prior.sum()

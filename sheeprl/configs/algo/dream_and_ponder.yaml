@@ -162,3 +162,8 @@ critic:
 # Player agent (it interacts with the environment)
 player:
   discrete_size: ${algo.world_model.discrete_size}
+
+ponder:
+  max_ponder_steps: 4
+  lambda_prior_geom: 0.4
+  cum_halt_prob_threshold: 0.9

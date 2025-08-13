@@ -54,6 +54,25 @@
         }
       },
       {
+        "name": "GPU: Dream & Ponder (CRAFTER)",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/sheeprl.py",
+        "args": [
+          "exp=dream_and_ponder_XL_crafter",
+          "algo.learning_starts=64",
+          "total_steps=4096",
+          "fabric.accelerator=gpu",
+        ],
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal",
+        "justMyCode": true,
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "HYDRA_FULL_ERROR": "1"
+        }
+      },
+      {
         "name": "DreamerV3 (CRAFTER)",
         "type": "debugpy",
         "request": "launch",

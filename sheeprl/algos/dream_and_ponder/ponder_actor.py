@@ -59,23 +59,40 @@ class PonderActor(nn.Module):
         self.deterministic_inference = deterministic_inference
         self.no_goal_yet_representation = nn.Parameter(torch.rand(latent_state_dim))
 
+    # def _compute_halting_distribution(self, halt_probs: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Convert halting probabilities λ_n to distribution p_n.
+    #     p_n = λ_n * ∏_{i=1}^{n-1} (1 - λ_i)
+    #     """
+    #     batch_size, max_steps = halt_probs.shape
+    #     # Compute cumulative products of (1 - λ_i) for i=1 to n-1
+    #     not_halt = torch.clamp(1 - halt_probs, min=1e-7)  # Min clamp prevents underflow
+    #     cumprods = torch.cat(
+    #         [
+    #             torch.ones(batch_size, 1, device=halt_probs.device),
+    #             torch.cumprod(not_halt[:, :-1], dim=1),
+    #         ],
+    #         dim=1,
+    #     )
+    #     # Compute p_n = λ_n * ∏_{i=1}^{n-1} (1 - λ_i)
+    #     p_n = halt_probs * cumprods
+    #     return p_n
+
     def _compute_halting_distribution(self, halt_probs: torch.Tensor) -> torch.Tensor:
-        """
-        Convert halting probabilities λ_n to distribution p_n.
-        p_n = λ_n * ∏_{i=1}^{n-1} (1 - λ_i)
-        """
         batch_size, max_steps = halt_probs.shape
-        # Compute cumulative products of (1 - λ_i) for i=1 to n-1
-        not_halt = torch.clamp(1 - halt_probs, min=1e-7)  # Min clamp prevents underflow
+        not_halt = torch.clamp(1 - halt_probs, min=1e-7)
         cumprods = torch.cat(
-            [
-                torch.ones(batch_size, 1, device=halt_probs.device),
-                torch.cumprod(not_halt[:, :-1], dim=1),
-            ],
-            dim=1,
-        )
-        # Compute p_n = λ_n * ∏_{i=1}^{n-1} (1 - λ_i)
+			[
+				torch.ones(batch_size, 1, device=halt_probs.device),
+				torch.cumprod(not_halt[:, :-1], dim=1),
+			],
+			dim=1,
+		)
         p_n = halt_probs * cumprods
+		# Set final step to the leftover mass; avoids in-place on a tensor used to compute remainder
+        last = 1.0 - p_n[:, :-1].sum(dim=1)
+        last = torch.clamp(last, min=0.0)
+        p_n = torch.cat([p_n[:, :-1], last.unsqueeze(1)], dim=1)
         return p_n
 
     def forward(self, env_state: torch.Tensor) -> PonderActorOutput:
@@ -244,15 +261,32 @@ class PonderActorLoss(nn.Module):
         geometric_prior = self._compute_geometric_prior(max_ponder_steps)
         self.register_buffer("geometric_prior", geometric_prior.unsqueeze(0))
 
+    # def _compute_geometric_prior(self, max_ponder_steps: int) -> torch.Tensor:
+    #     """
+    #     Compute truncated geometric prior distribution.
+    #     p_G(n) = λ_p * (1 - λ_p)^(n-1) normalized over finite steps.
+    #     """
+    #     n = torch.arange(max_ponder_steps)
+    #     geometric_prior = self.lambda_prior_geom * (1 - self.lambda_prior_geom) ** n
+    #     # Normalize to sum to 1 over truncated support
+    #     geometric_prior = geometric_prior / geometric_prior.sum()
+    #     return geometric_prior
+
     def _compute_geometric_prior(self, max_ponder_steps: int) -> torch.Tensor:
         """
-        Compute truncated geometric prior distribution.
-        p_G(n) = λ_p * (1 - λ_p)^(n-1) normalized over finite steps.
+        Compute truncated geometric prior with tail mass at last step.
+        p_G(n) = λ_p (1 - λ_p)^(n-1) for n < N; p_G(N) = (1 - λ_p)^(N-1).
         """
-        n = torch.arange(max_ponder_steps)
-        geometric_prior = self.lambda_prior_geom * (1 - self.lambda_prior_geom) ** n
-        # Normalize to sum to 1 over truncated support
-        geometric_prior = geometric_prior / geometric_prior.sum()
+        N = max_ponder_steps
+        if N == 1:
+            return torch.tensor([1.0])
+        base = 1.0 - float(self.lambda_prior_geom)
+        head = float(self.lambda_prior_geom) * torch.pow(
+            torch.full((N - 1,), base, dtype=torch.float32),
+            torch.arange(N - 1, dtype=torch.float32),
+        )
+        tail_last = head.new_tensor([base ** (N - 1)])
+        geometric_prior = torch.cat([head, tail_last], dim=0)
         return geometric_prior
 
     def forward(
@@ -271,7 +305,7 @@ class PonderActorLoss(nn.Module):
             Combined loss (expected task loss + β * KL(p || p_G))
         """
         # Expected task loss under halting distribution
-        expected_loss = (halt_step_task_losses * halt_distribution).sum(dim=1).mean()
+        expected_loss = torch.dot(halt_step_task_losses, halt_distribution)
         # KL divergence: KL(p || q) = sum(p * log(p/q))
         eps = 1e-8  # Small constant for numerical stability & avoiding log(0)
         kl_div = torch.log((halt_distribution + eps) / (self.geometric_prior + eps))

@@ -247,6 +247,7 @@ def train(
     assert len(all_actor_output_objects) == 1
     # Shape (of below): [batch, max_ponder_steps, num_actions]
     halt_distributions = all_actor_output_objects[0].halt_distribution
+    halt_distribution = halt_distributions.mean(dim=-2).flatten()
     actions_across_halt_steps = all_actor_output_objects[0].halt_step_outputs
     for i in range(max_ponder_steps):
         actions_at_halt_step = actions_across_halt_steps[:, :, i, :]
@@ -255,6 +256,7 @@ def train(
 
     actor.training = False  # Unset this so actor only returns 1 action in future imagination steps
     policy_loss_across_halt_steps = torch.empty(max_ponder_steps, device=device)
+    lambda_values_across_halt_steps = []
     for i in range(max_ponder_steps):
         # The imagination goes like this, with H=3:
         # Actions:           a'0      a'1      a'2     a'4
@@ -305,6 +307,7 @@ def train(
             continues[1:] * cfg.algo.gamma,
             lmbda=cfg.algo.lmbda,
         )
+        lambda_values_across_halt_steps.append(lambda_values)
 
         # Compute the discounts to multiply the lambda values to
         with torch.no_grad():
@@ -356,7 +359,7 @@ def train(
             discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1])
         )
 
-    policy_loss = ponder_loss(policy_loss_across_halt_steps, halt_distributions)
+    policy_loss = ponder_loss(policy_loss_across_halt_steps, halt_distribution)
     fabric.backward(policy_loss)
     actor_grads = None
     if cfg.algo.actor.clip_gradients is not None and cfg.algo.actor.clip_gradients > 0:
@@ -368,23 +371,24 @@ def train(
         )
     actor_optimizer.step()
 
-    # Stack along the batch dim
-    # (turning it into batch_size * sequence_length * max_ponder_steps)
-    all_imagined_trajectories = torch.stack(imagined_trajectories_across_halt_steps, dim=1)
-
-    # Predict the values
-    qv = TwoHotEncodingDistribution(critic(all_imagined_trajectories.detach()[:-1]), dims=1)
-    predicted_target_values = TwoHotEncodingDistribution(
-        target_critic(all_imagined_trajectories.detach()[:-1]), dims=1
-    ).mean
-
     # Critic optimization. Eq. 10 in the paper
-    critic_optimizer.zero_grad(set_to_none=True)
-    value_loss = -qv.log_prob(lambda_values.detach())
-    value_loss = value_loss - qv.log_prob(predicted_target_values.detach())
-    value_loss = torch.mean(value_loss * discount[:-1].squeeze(-1))
-
-    fabric.backward(value_loss)
+    value_losses_across_halt_steps = torch.empty(max_ponder_steps, device=device)
+    for i in range(max_ponder_steps):
+        imagined_trajectories = imagined_trajectories_across_halt_steps[i]
+        # Predict the values
+        qv = TwoHotEncodingDistribution(critic(imagined_trajectories.detach()[:-1]), dims=1)
+        predicted_target_values = TwoHotEncodingDistribution(
+            target_critic(imagined_trajectories.detach()[:-1]), dims=1
+        ).mean
+        critic_optimizer.zero_grad(set_to_none=True)
+        value_loss = -qv.log_prob(lambda_values.detach())
+        value_loss = value_loss - qv.log_prob(predicted_target_values.detach())
+        value_loss = torch.mean(value_loss * discount[:-1].squeeze(-1))
+        value_losses_across_halt_steps[i] = value_loss
+    weighted_value_loss = torch.dot(
+        value_losses_across_halt_steps, halt_distribution.detach()
+    )
+    fabric.backward(weighted_value_loss)
     critic_grads = None
     if cfg.algo.critic.clip_gradients is not None and cfg.algo.critic.clip_gradients > 0:
         critic_grads = fabric.clip_gradients(

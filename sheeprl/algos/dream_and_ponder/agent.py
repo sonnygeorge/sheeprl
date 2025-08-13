@@ -798,7 +798,6 @@ class Actor(nn.Module):
         unimix: float = 0.01,
         action_clip: float = 1.0,
     ) -> None:
-        print("Latent state size:", latent_state_size)
         super().__init__()
         self.training = True  # Default to training mode
         self.distribution_cfg = distribution_cfg

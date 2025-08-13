@@ -255,7 +255,8 @@ def train(
         imagined_actions_across_halt_steps[i][0] = actions_at_halt_step
 
     actor.training = False  # Unset this so actor only returns 1 action in future imagination steps
-    policy_loss_across_halt_steps = torch.empty(max_ponder_steps, device=device)
+    # Collect per-halt-step policy losses as tensors to preserve gradients
+    policy_losses_per_halt_step = []
     lambda_values_across_halt_steps = []
     for i in range(max_ponder_steps):
         # The imagination goes like this, with H=3:
@@ -355,11 +356,12 @@ def train(
         except NotImplementedError:
             entropy = torch.zeros_like(objective)
 
-        policy_loss_across_halt_steps[i] = -torch.mean(
-            discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1])
+        policy_losses_per_halt_step.append(
+            -torch.mean(discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1]))
         )
 
-    policy_loss = ponder_loss(policy_loss_across_halt_steps, halt_distribution)
+    # Stack to shape [max_ponder_steps] so gradients flow through the combined loss
+    policy_loss = ponder_loss(torch.stack(policy_losses_per_halt_step, dim=0), halt_distribution)
     fabric.backward(policy_loss)
     actor_grads = None
     if cfg.algo.actor.clip_gradients is not None and cfg.algo.actor.clip_gradients > 0:
@@ -372,7 +374,8 @@ def train(
     actor_optimizer.step()
 
     # Critic optimization. Eq. 10 in the paper
-    value_losses_across_halt_steps = torch.empty(max_ponder_steps, device=device)
+    # Collect per-halt-step value losses as tensors to preserve gradients
+    value_losses_per_halt_step = []
     for i in range(max_ponder_steps):
         imagined_trajectories = imagined_trajectories_across_halt_steps[i]
         # Predict the values
@@ -380,13 +383,22 @@ def train(
         predicted_target_values = TwoHotEncodingDistribution(
             target_critic(imagined_trajectories.detach()[:-1]), dims=1
         ).mean
+        # Recompute continues/discounts for this halt step
+        continues_i = Independent(
+            BernoulliSafeMode(logits=world_model.continue_model(imagined_trajectories)), 1
+        ).mode
+        true_continue = (1 - data["terminated"]).flatten().reshape(1, -1, 1)
+        continues_i = torch.cat((true_continue, continues_i[1:]))
+        with torch.no_grad():
+            discount_i = torch.cumprod(continues_i * cfg.algo.gamma, dim=0) / cfg.algo.gamma
         critic_optimizer.zero_grad(set_to_none=True)
-        value_loss = -qv.log_prob(lambda_values.detach())
+        targets_i = lambda_values_across_halt_steps[i]
+        value_loss = -qv.log_prob(targets_i.detach())
         value_loss = value_loss - qv.log_prob(predicted_target_values.detach())
-        value_loss = torch.mean(value_loss * discount[:-1].squeeze(-1))
-        value_losses_across_halt_steps[i] = value_loss
+        value_loss = torch.mean(value_loss * discount_i[:-1].squeeze(-1))
+        value_losses_per_halt_step.append(value_loss)
     weighted_value_loss = torch.dot(
-        value_losses_across_halt_steps, halt_distribution.detach()
+        torch.stack(value_losses_per_halt_step, dim=0), halt_distribution.detach()
     )
     fabric.backward(weighted_value_loss)
     critic_grads = None

@@ -79,17 +79,21 @@ class PonderActor(nn.Module):
     #     return p_n
 
     def _compute_halting_distribution(self, halt_probs: torch.Tensor) -> torch.Tensor:
+        """
+        Convert halting probabilities λ_n to distribution p_n.
+        p_n = λ_n * ∏_{i=1}^{n-1} (1 - λ_i)
+        """
         batch_size, max_steps = halt_probs.shape
         not_halt = torch.clamp(1 - halt_probs, min=1e-7)
         cumprods = torch.cat(
-			[
-				torch.ones(batch_size, 1, device=halt_probs.device),
-				torch.cumprod(not_halt[:, :-1], dim=1),
-			],
-			dim=1,
-		)
+            [
+                torch.ones(batch_size, 1, device=halt_probs.device),
+                torch.cumprod(not_halt[:, :-1], dim=1),
+            ],
+            dim=1,
+        )
         p_n = halt_probs * cumprods
-		# Set final step to the leftover mass; avoids in-place on a tensor used to compute remainder
+        # Set final step to the leftover mass; avoids in-place on a tensor used to compute remainder
         last = 1.0 - p_n[:, :-1].sum(dim=1)
         last = torch.clamp(last, min=0.0)
         p_n = torch.cat([p_n[:, :-1], last.unsqueeze(1)], dim=1)
@@ -291,8 +295,8 @@ class PonderActorLoss(nn.Module):
 
     def forward(
         self,
-        halt_step_task_losses: torch.Tensor,  # [batch, max_ponder_steps]
-        halt_distribution: torch.Tensor,  # [batch, max_ponder_steps]
+        halt_step_task_losses: torch.Tensor,  # [max_ponder_steps] or [batch, max_ponder_steps]
+        halt_distribution: torch.Tensor,  # [max_ponder_steps] or [batch, max_ponder_steps]
     ) -> torch.Tensor:
         """
         Compute PonderNet loss: expected task loss plus β-weighted KL divergence.
@@ -305,11 +309,21 @@ class PonderActorLoss(nn.Module):
             Combined loss (expected task loss + β * KL(p || p_G))
         """
         # Expected task loss under halting distribution
-        expected_loss = torch.dot(halt_step_task_losses, halt_distribution)
-        # KL divergence: KL(p || q) = sum(p * log(p/q))
-        eps = 1e-8  # Small constant for numerical stability & avoiding log(0)
-        kl_div = torch.log((halt_distribution + eps) / (self.geometric_prior + eps))
-        kl_div = (halt_distribution * kl_div).sum(dim=1).mean()
+        if halt_distribution.dim() == 1:
+            expected_loss = torch.dot(halt_step_task_losses, halt_distribution)
+            # KL divergence: KL(p || q) = sum(p * log(p/q))
+            eps = 1e-8
+            prior = self.geometric_prior.squeeze(0)
+            kl = torch.log((halt_distribution + eps) / (prior + eps))
+            kl_div = (halt_distribution * kl).sum()
+        elif halt_distribution.dim() == 2:
+            # Shape: [batch, steps]
+            expected_loss = (halt_step_task_losses * halt_distribution).sum(dim=1).mean()
+            eps = 1e-8
+            kl = torch.log((halt_distribution + eps) / (self.geometric_prior + eps))
+            kl_div = (halt_distribution * kl).sum(dim=1).mean()
+        else:
+            raise ValueError("halt_distribution must be 1D or 2D tensor")
         # Combined loss
         loss = expected_loss + self.beta * kl_div
         return loss

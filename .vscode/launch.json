@@ -1,0 +1,75 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Dream & Ponder (PACMAN)",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/sheeprl.py",
+        "args": [
+          "exp=dream_and_ponder_100k_ms_pacman",
+        ],
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal",
+        "justMyCode": true,
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "HYDRA_FULL_ERROR": "1"
+        }
+      },
+      {
+        "name": "DreamerV3 (PACMAN)",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/sheeprl.py",
+        "args": [
+          "exp=dreamer_v3_100k_ms_pacman",
+        ],
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal",
+        "justMyCode": true,
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "HYDRA_FULL_ERROR": "1"
+        }
+      },
+      {
+        "name": "Dream & Ponder (CRAFTER)",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/sheeprl.py",
+        "args": [
+          "exp=dream_and_ponder_XL_crafter",
+          "algo.learning_starts=512",
+          "algo.horizon=3",
+          "algo.ponder.max_ponder_steps=3",
+          "total_steps=4096"
+        ],
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal",
+        "justMyCode": true,
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "HYDRA_FULL_ERROR": "1"
+        }
+      },
+      {
+        "name": "DreamerV3 (CRAFTER)",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder}/sheeprl.py",
+        "args": [
+          "exp=dreamer_v3_XL_crafter",
+          "algo.learning_starts=64",
+          "algo.horizon=3"
+        ],
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal",
+        "justMyCode": true,
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}",
+          "HYDRA_FULL_ERROR": "1"
+        }
+      }
+    ]
+  }

@@ -247,7 +247,7 @@ def train(
     assert len(all_actor_output_objects) == 1
     # Shape (of below): [batch, max_ponder_steps, num_actions]
     halt_distributions = all_actor_output_objects[0].halt_distribution
-    halt_distribution = halt_distributions.mean(dim=-2).flatten()
+
     actions_across_halt_steps = all_actor_output_objects[0].halt_step_outputs
     for i in range(max_ponder_steps):
         actions_at_halt_step = actions_across_halt_steps[:, :, i, :]
@@ -356,12 +356,16 @@ def train(
         except NotImplementedError:
             entropy = torch.zeros_like(objective)
 
-        policy_losses_per_halt_step.append(
-            -torch.mean(discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1]))
-        )
+        # Compute per-sample per-step policy loss
+        per_timestep_loss = -(discount[:-1].detach() * (objective + entropy.unsqueeze(dim=-1)[:-1]))
+        per_sample_loss_i = per_timestep_loss.mean(dim=0).squeeze(-1)
+        policy_losses_per_halt_step.append(per_sample_loss_i)
 
-    # Stack to shape [max_ponder_steps] so gradients flow through the combined loss
-    policy_loss = ponder_loss(torch.stack(policy_losses_per_halt_step, dim=0), halt_distribution)
+    # Combine per-halt-step losses with each sample's halting distribution
+    halt_dist_b = halt_distributions.squeeze(0)
+    per_sample_policy_losses = torch.stack(policy_losses_per_halt_step, dim=0).transpose(0, 1)
+
+    policy_loss = ponder_loss(per_sample_policy_losses, halt_dist_b)
     fabric.backward(policy_loss)
     actor_grads = None
     if cfg.algo.actor.clip_gradients is not None and cfg.algo.actor.clip_gradients > 0:
@@ -376,6 +380,7 @@ def train(
     # Critic optimization. Eq. 10 in the paper
     # Collect per-halt-step value losses as tensors to preserve gradients
     value_losses_per_halt_step = []
+    critic_optimizer.zero_grad(set_to_none=True)
     for i in range(max_ponder_steps):
         imagined_trajectories = imagined_trajectories_across_halt_steps[i]
         # Predict the values
@@ -391,15 +396,17 @@ def train(
         continues_i = torch.cat((true_continue, continues_i[1:]))
         with torch.no_grad():
             discount_i = torch.cumprod(continues_i * cfg.algo.gamma, dim=0) / cfg.algo.gamma
-        critic_optimizer.zero_grad(set_to_none=True)
         targets_i = lambda_values_across_halt_steps[i]
-        value_loss = -qv.log_prob(targets_i.detach())
-        value_loss = value_loss - qv.log_prob(predicted_target_values.detach())
-        value_loss = torch.mean(value_loss * discount_i[:-1].squeeze(-1))
-        value_losses_per_halt_step.append(value_loss)
-    weighted_value_loss = torch.dot(
-        torch.stack(value_losses_per_halt_step, dim=0), halt_distribution.detach()
-    )
+        per_timestep = -qv.log_prob(targets_i.detach())
+        per_timestep = per_timestep - qv.log_prob(predicted_target_values.detach())
+        per_timestep = per_timestep * discount_i[:-1].squeeze(-1)
+        per_sample_value_loss_i = per_timestep.mean(dim=0)
+        value_losses_per_halt_step.append(per_sample_value_loss_i)
+
+    # Combine per-halt-step losses with each sample's halting distribution
+    halt_dist_b = halt_distributions.squeeze(0).detach()
+    per_sample_value_losses = torch.stack(value_losses_per_halt_step, dim=0).transpose(0, 1)
+    weighted_value_loss = (per_sample_value_losses * halt_dist_b).sum(dim=1).mean()
     fabric.backward(weighted_value_loss)
     critic_grads = None
     if cfg.algo.critic.clip_gradients is not None and cfg.algo.critic.clip_gradients > 0:
@@ -434,7 +441,7 @@ def train(
             .detach(),
         )
         aggregator.update("Loss/policy_loss", policy_loss.detach())
-        aggregator.update("Loss/value_loss", value_loss.detach())
+        aggregator.update("Loss/value_loss", weighted_value_loss.detach())
         if world_model_grads:
             aggregator.update("Grads/world_model", world_model_grads.mean().detach())
         if actor_grads:

@@ -40,8 +40,8 @@
         "program": "${workspaceFolder}/sheeprl.py",
         "args": [
           "exp=dream_and_ponder_XL_crafter",
-          "algo.learning_starts=512",
-          "algo.horizon=3",
+          "algo.learning_starts=64",
+          "algo.horizon=5",
           "algo.ponder.max_ponder_steps=3",
           "total_steps=4096"
         ],

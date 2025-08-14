@@ -295,8 +295,8 @@ class PonderActorLoss(nn.Module):
 
     def forward(
         self,
-        halt_step_task_losses: torch.Tensor,  # [max_ponder_steps] or [batch, max_ponder_steps]
-        halt_distribution: torch.Tensor,  # [max_ponder_steps] or [batch, max_ponder_steps]
+        halt_step_task_losses: torch.Tensor,  # [batch, max_ponder_steps]
+        halt_distribution: torch.Tensor,  # [batch, max_ponder_steps]
     ) -> torch.Tensor:
         """
         Compute PonderNet loss: expected task loss plus β-weighted KL divergence.
@@ -308,22 +308,12 @@ class PonderActorLoss(nn.Module):
         Returns:
             Combined loss (expected task loss + β * KL(p || p_G))
         """
-        # Expected task loss under halting distribution
-        if halt_distribution.dim() == 1:
-            expected_loss = torch.dot(halt_step_task_losses, halt_distribution)
-            # KL divergence: KL(p || q) = sum(p * log(p/q))
-            eps = 1e-8
-            prior = self.geometric_prior.squeeze(0)
-            kl = torch.log((halt_distribution + eps) / (prior + eps))
-            kl_div = (halt_distribution * kl).sum()
-        elif halt_distribution.dim() == 2:
-            # Shape: [batch, steps]
-            expected_loss = (halt_step_task_losses * halt_distribution).sum(dim=1).mean()
-            eps = 1e-8
-            kl = torch.log((halt_distribution + eps) / (self.geometric_prior + eps))
-            kl_div = (halt_distribution * kl).sum(dim=1).mean()
-        else:
-            raise ValueError("halt_distribution must be 1D or 2D tensor")
+
+        assert halt_distribution.dim() == 2
+        expected_loss = (halt_step_task_losses * halt_distribution).sum(dim=1).mean()
+        eps = 1e-8
+        kl = torch.log((halt_distribution + eps) / (self.geometric_prior + eps))
+        kl_div = (halt_distribution * kl).sum(dim=1).mean()
         # Combined loss
         loss = expected_loss + self.beta * kl_div
         return loss
